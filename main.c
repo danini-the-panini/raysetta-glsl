@@ -11,8 +11,12 @@
 #define WIDTH 400
 #define HEIGHT 200
 
+typedef struct vec3 {
+  float x; float y; float z;
+} Vec3;
+
 typedef struct sphere {
-  struct { float x; float y; float z; } center;
+  Vec3 center;
   float radius;
 } Sphere;
 
@@ -74,6 +78,14 @@ bool check_program(GLuint program) {
   return false;
 }
 
+float randf() {
+  return (float)rand() / (float)RAND_MAX;
+}
+
+float randf_r(float min, float max) {
+  return min + (max-min)*randf();
+}
+
 int main(void) {
   srand(time(NULL));
   glfwInit();
@@ -92,9 +104,11 @@ int main(void) {
   glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
   printf("MAX TEX: %i\n", max_tex);
 
+  glEnable(GL_FRAMEBUFFER_SRGB);
+
   float *noise = malloc(sizeof(float)*max_tex);
   for (GLsizei i = 0; i < max_tex; i++) {
-    noise[i] = (float)rand() / (float)RAND_MAX;
+    noise[i] = randf();
   }
 
   GLuint vao;
@@ -118,6 +132,9 @@ int main(void) {
 
   glUseProgram(program);
 
+  GLuint time_loc = glGetUniformLocation(program, "time");
+  GLuint utime_loc = glGetUniformLocation(program, "utime");
+
   GLuint noise_tex = 0;
   glGenTextures(1, &noise_tex);
   glBindTexture(GL_TEXTURE_1D, noise_tex);
@@ -133,7 +150,7 @@ int main(void) {
   glUniform1i(noise_loc, 0);
   glUniform1i(noise_size_loc, max_tex);
 
-  const int samples = 5;
+  const int samples = 50;
 
   GLuint samples_loc = glGetUniformLocation(program, "samples");
   glUniform1i(samples_loc, samples);
@@ -141,14 +158,19 @@ int main(void) {
   GLuint res_loc = glGetUniformLocation(program, "res");
   glUniform2f(res_loc, WIDTH, HEIGHT);
 
+  Vec3 cam_eye;
+  cam_eye.x = 0.0;
+  cam_eye.y = 0.0;
+  cam_eye.z = 0.0;
+
   GLuint cam_eye_loc = glGetUniformLocation(program, "cam_eye");
-  glUniform3f(cam_eye_loc, 0.0, 0.0, 0.0);
+  glUniform3f(cam_eye_loc, cam_eye.x, cam_eye.y, cam_eye.z);
 
   const int sphere_count = 2;
   Sphere spheres[100];
 
   sph_set_center(&spheres[0], 0.0, 0.0, -1.0);
-  spheres[0].radius = -0.5;
+  spheres[0].radius = 0.5;
 
   sph_set_center(&spheres[1], 0.0, -100.5, -1.0);
   spheres[1].radius = 100.0;
@@ -168,9 +190,7 @@ int main(void) {
   glBindBufferBase(GL_UNIFORM_BUFFER, 0, sph_buf);
   glBindBufferRange(GL_UNIFORM_BUFFER, 2, sph_buf, 0, sizeof(Sphere)*100);
 
-  glBindBuffer(GL_UNIFORM_BUFFER, sph_buf);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
-  glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
@@ -178,9 +198,12 @@ int main(void) {
     int w, h;
     glfwGetWindowSize(window,&w, &h);
     glUniform2f(res_loc, w, h);
+    float t = glfwGetTime();
+    glUniform1f(time_loc, t);
+    glUniform1ui(utime_loc, (GLuint)t);
 
     for (GLsizei i = 0; i < max_tex; i++) {
-      noise[i] = (float)rand() / (float)RAND_MAX;
+      noise[i] = randf();
     }
     glTexSubImage1D(GL_TEXTURE_1D, 0, 0, max_tex, GL_RED, GL_FLOAT, noise);
 

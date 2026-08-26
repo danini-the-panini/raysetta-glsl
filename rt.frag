@@ -1,6 +1,8 @@
 #version 410
 precision highp float;
 
+const float PI = 3.1415926535897932385;
+
 const float pos_inf = 1e38;
 const float neg_inf = -1e38;
 
@@ -11,12 +13,47 @@ uniform int samples;
 uniform int noise_size;
 uniform sampler1D noise;
 
-int rand_index;
+uniform float time;
+uniform uint utime;
 
+int rand_index;
 float rand() {
   vec4 r = texture(noise, float(rand_index) / float(noise_size) + 0.5);
-  rand_index++;
+  rand_index++; // = int(floor(r.x*float(noise_size))) % noise_size;
   return r.x;
+}
+
+float rand(float min, float max) {
+  return min + (max-min)*rand();
+}
+
+vec3 jitter(vec3 d, float phi, float sina, float cosa) {
+  vec3 w = normalize(d), u = normalize(cross(w.yzx, w)), v = cross(w, u);
+  return (u*cos(phi) + v*sin(phi)) * sina + w * cosa;
+}
+
+vec3 rand3() {
+  return vec3(rand(), rand(), rand());
+}
+
+vec3 rand3(float min, float max) {
+  return vec3(rand(min, max), rand(min, max), rand(min, max));
+}
+
+vec2 gauss() {
+  float theta = 2.0 * PI * rand();
+  float r = sqrt(-2.0 * log(rand()));
+  return vec2(r * cos(theta), r * sin(theta));
+}
+
+vec3 rand_unit() {
+  return normalize(vec3(gauss(), gauss().x));
+}
+
+vec3 rand_hemi(vec3 n) {
+  vec3 u = rand_unit();
+  if (dot(u, n) > 0.0) return u;
+  return -u;
 }
 
 vec3 sample_square(vec2 st) {
@@ -105,10 +142,6 @@ bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
   return true;
 }
 
-bool notfin(float v) {
-  return isinf(v) || isnan(v);
-}
-
 bool hit_world(Ray ray, Range ray_t, out Hit hit) {
   Hit tmp;
   bool did_hit = false;
@@ -149,18 +182,36 @@ Ray get_ray() {
   return Ray(ray_orig, ray_dir);
 }
 
-vec3 ray_color(Ray ray) {
+bool ray_color1(Ray ray, out Ray ray2, out vec3 col) {
   Hit hit;
-  if (hit_world(ray, Range(0.0, pos_inf), hit)) {
-    return 0.5 * (hit.n + vec3(1.0, 1.0, 1.0));
+  if (hit_world(ray, Range(0.001, pos_inf), hit)) {
+    vec3 dir = hit.n + rand_unit();
+    ray2 = Ray(hit.p, dir);
+    return true;
   }
   vec3 unit_dir = normalize(ray.dir);
   float a = 0.5*(unit_dir.y + 1.0);
-  return (1.0-a)*vec3(1.0, 1.0, 1.0) + a*vec3(0.5, 0.7, 1.0);
+  col = (1.0-a)*vec3(1.0, 1.0, 1.0) + a*vec3(0.5, 0.7, 1.0);
+  return false;
+}
+
+vec3 ray_color(Ray ray) {
+  Ray ray2 = ray;
+  float mul = 1.0;
+  for (int i = 0; i < 10; i++) {
+    vec3 col;
+    if (ray_color1(ray, ray2, col)) {
+      mul *= 0.5;
+      ray = ray2;
+    } else {
+      return col*mul;
+    }
+  }
+  return vec3(0.0, 0.0, 0.0);
 }
 
 void main() {
-  rand_index = int(floor(gl_FragCoord.x) + floor(res.x * gl_FragCoord.y)) % noise_size;
+  rand_index = int(time + floor(gl_FragCoord.x) + floor(res.x * gl_FragCoord.y) + noise_size * time) % noise_size;
 
   scr = uv * res;
 
