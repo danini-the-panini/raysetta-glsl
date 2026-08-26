@@ -12,8 +12,8 @@
 #include "linmath.h"
 #include "camera.h"
 
-#define WIDTH 400
-#define HEIGHT 200
+#define WIDTH 720
+#define HEIGHT 400
 
 #define LAMBERT 0
 #define METAL 1
@@ -24,14 +24,16 @@
 typedef struct material {
   int id;
   int type;
-  float __0;
-  float __1;
 } Material;
 
 typedef struct sphere {
   vec3 center;
+  float __0;
+  vec3 vec;
   float radius;
   Material mat;
+  float __1;
+  float __2;
 } Sphere;
 
 typedef struct lambert {
@@ -139,7 +141,7 @@ static Lambert lamberts[MAX_OBJS];
 static Metal metals[MAX_OBJS];
 static Glass glass[MAX_OBJS];
 
-static inline int make_sphere(vec3 center, float radius, int mat_type, int mat_id) {
+static inline int make_moving_sphere(vec3 center1, vec3 center2, float radius, int mat_type, int mat_id) {
   if (mat_id < 0) {
     fprintf(stderr, "invalid material id (%i)\n'", mat_id);
     return -1;
@@ -148,11 +150,16 @@ static inline int make_sphere(vec3 center, float radius, int mat_type, int mat_i
     fprintf(stderr, "maximum number of spheres reached (%i)\n", MAX_OBJS);
     return -1;
   }
-  vec3_copy(spheres[sphere_count].center, center);
+  vec3_copy(spheres[sphere_count].center, center1);
+  vec3_sub(spheres[sphere_count].vec, center2, center1);
   spheres[sphere_count].radius = radius;
   spheres[sphere_count].mat.type = mat_type;
   spheres[sphere_count].mat.id = mat_id;
   return sphere_count++;
+}
+
+static inline int make_sphere(vec3 center, float radius, int mat_type, int mat_id) {
+  return make_moving_sphere(center, center, radius, mat_type, mat_id);
 }
 
 static inline int make_lambert(vec3 albedo) {
@@ -329,11 +336,12 @@ int main(void) {
       if (vec3_len(tmp) > 0.9) {
         if (choose_mat < 0.8) {
           // diffuse
-          vec3 r, c;
+          vec3 r, c, center2;
           vec3_rand(r);
           vec3_rand(c);
           vec3_mul(c, c, r);
-          make_sphere(center, 0.2, LAMBERT, make_lambert(c));
+          vec3_add(center2, center, (vec3){0.0, randf()*0.5, 0.0});
+          make_moving_sphere(center, center2, 0.2, LAMBERT, make_lambert(c));
         } else if (choose_mat < 0.95) {
           // metal
           vec3 r, c;
@@ -353,6 +361,7 @@ int main(void) {
   glUniform1i(sphere_count_loc, sphere_count);
 
   GLuint sph_loc = glGetUniformBlockIndex(program, "ObjBlock");
+  GLint size, stride;
   glUniformBlockBinding(program, sph_loc, 0);
   GLuint sph_buf;
   glGenBuffers(1, &sph_buf);

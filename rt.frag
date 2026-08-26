@@ -71,6 +71,7 @@ struct Material {
 
 struct Sphere {
   vec3 center;
+  vec3 vec;
   float radius;
   Material mat;
 };
@@ -154,6 +155,7 @@ bool nearz(vec3 v) {
 struct Ray {
   vec3 orig;
   vec3 dir;
+  float tm;
 };
 
 struct Range {
@@ -188,7 +190,7 @@ bool scat_lambert(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   Lambert mat = lamberts[hit.mat.id];
   vec3 scat_dir = hit.n + rand_unit();
   if (nearz(scat_dir)) scat_dir = hit.n;
-  scat = Ray(hit.p, scat_dir);
+  scat = Ray(hit.p, scat_dir, r_in.tm);
   att = mat.albedo;
   return true;
 }
@@ -196,7 +198,7 @@ bool scat_lambert(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
 bool scat_metal(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   Metal mat = metals[hit.mat.id];
   vec3 r = normalize(reflect(r_in.dir, hit.n)) + (mat.fuzz * rand_unit());
-  scat = Ray(hit.p, r);
+  scat = Ray(hit.p, r, r_in.tm);
   att = mat.albedo;
   return (dot(r, hit.n) > 0.0);
 }
@@ -225,7 +227,7 @@ bool scat_glass(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
     dir = refract(unit, hit.n, ri);
   }
 
-  scat = Ray(hit.p, dir);
+  scat = Ray(hit.p, dir, r_in.tm);
   return true;
 }
 
@@ -242,7 +244,8 @@ bool scat(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
 }
 
 bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
-  vec3 oc = self.center - ray.orig;
+  vec3 center = self.center + self.vec * ray.tm;
+  vec3 oc = center - ray.orig;
   float a = dot(ray.dir, ray.dir);
   float h = dot(ray.dir, oc);
   float c = dot(oc, oc) - self.radius*self.radius;
@@ -264,7 +267,7 @@ bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
   hit.t = root;
   vec3 point = ray_at(ray, root);
   hit.p = point;
-  vec3 n = (point - self.center) / self.radius;
+  vec3 n = (point - center) / self.radius;
   set_face_normal(ray, n, hit);
   hit.mat = self.mat;
 
@@ -298,7 +301,7 @@ Ray get_ray() {
   vec3 ray_orig = defocus_angle <= 0 ? eye : defocus_disk_sample();
   vec3 ray_dir = px_sample - ray_orig;
 
-  return Ray(ray_orig, ray_dir);
+  return Ray(ray_orig, ray_dir, rand());
 }
 
 bool ray_color1(Ray ray, out Ray ray2, out vec3 col) {
