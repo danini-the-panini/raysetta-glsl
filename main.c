@@ -19,6 +19,8 @@
 #define METAL 1
 #define GLASS 2
 
+#define MAX_OBJS 200
+
 typedef struct material {
   int id;
   int type;
@@ -107,12 +109,18 @@ bool check_program(GLuint program) {
   return false;
 }
 
-float randf() {
+static inline float randf() {
   return (float)rand() / (float)RAND_MAX;
 }
 
-float randf_r(float min, float max) {
+static inline float randf_r(float min, float max) {
   return min + (max-min)*randf();
+}
+
+static inline void vec3_rand(vec3 r) {
+  r[0] = randf();
+  r[1] = randf();
+  r[2] = randf();
 }
 
 static bool clear = true;
@@ -121,6 +129,59 @@ static double last_mouse[2];
 static float orbit_max = 100.0;
 static float orbit_min = 0.1;
 static GLuint frame = 0;
+
+static int sphere_count = 0;
+static int lambert_count = 0;
+static int metal_count = 0;
+static int glass_count = 0;
+static Sphere spheres[MAX_OBJS];
+static Lambert lamberts[MAX_OBJS];
+static Metal metals[MAX_OBJS];
+static Glass glass[MAX_OBJS];
+
+static inline int make_sphere(vec3 center, float radius, int mat_type, int mat_id) {
+  if (mat_id < 0) {
+    fprintf(stderr, "invalid material id (%i)\n'", mat_id);
+    return -1;
+  }
+  if (sphere_count >= MAX_OBJS) {
+    fprintf(stderr, "maximum number of spheres reached (%i)\n", MAX_OBJS);
+    return -1;
+  }
+  vec3_copy(spheres[sphere_count].center, center);
+  spheres[sphere_count].radius = radius;
+  spheres[sphere_count].mat.type = mat_type;
+  spheres[sphere_count].mat.id = mat_id;
+  return sphere_count++;
+}
+
+static inline int make_lambert(vec3 albedo) {
+  if (lambert_count >= MAX_OBJS) {
+    fprintf(stderr, "maximum number of lamberts reached (%i)", MAX_OBJS);
+    return -1;
+  }
+  vec3_copy(lamberts[lambert_count].albedo, albedo);
+  return lambert_count++;
+}
+
+static inline int make_metal(vec3 albedo, float fuzz) {
+  if (metal_count >= MAX_OBJS) {
+    fprintf(stderr, "maximum number of metals reached (%i)", MAX_OBJS);
+    return -1;
+  }
+  vec3_copy(metals[metal_count].albedo, albedo);
+  metals[metal_count].fuzz = fuzz;
+  return metal_count++;
+}
+
+static inline int make_glass(float index) {
+  if (glass_count >= MAX_OBJS) {
+    fprintf(stderr, "maximum number of glasss reached (%i)", MAX_OBJS);
+    return -1;
+  }
+  glass[glass_count].index = index;
+  return glass_count++;
+}
 
 void on_resize(GLFWwindow *win, int w, int h) {
   clear = true;
@@ -165,7 +226,6 @@ int main(void) {
 
   GLsizei max_tex = 0;
   glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
-  printf("MAX TEX: %i\n", max_tex);
 
   glEnable(GL_FRAMEBUFFER_SRGB);
   glEnable(GL_BLEND);
@@ -217,7 +277,7 @@ int main(void) {
   glUniform1i(noise_loc, 0);
   glUniform1i(noise_size_loc, max_tex);
 
-  const int samples = 10;
+  const int samples = 1;
   const int depth = 10;
 
   GLuint samples_loc = glGetUniformLocation(program, "samples");
@@ -228,12 +288,12 @@ int main(void) {
   GLuint res_loc = glGetUniformLocation(program, "res");
   glUniform2f(res_loc, WIDTH, HEIGHT);
 
-  vec3_set(cam.eye, -2.0, 1.0, 1.0);
-  vec3_set(cam.tgt, 0.0, 0.0, -1.0);
+  vec3_set(cam.eye, 13.0, 2.0, 3.0);
+  vec3_set(cam.tgt, 0.0, 0.0, 0.0);
   vec3_set(cam.vup, 0.0, 1.0, 0.0);
-  cam.vfov = 45.0;
-  cam.defocus_angle = 2.0;
-  cam.focus_dist = 3.4;
+  cam.vfov = 20.0;
+  cam.defocus_angle = 0.6;
+  cam.focus_dist = 10.0;
 
   GLuint eye_loc = glGetUniformLocation(program, "eye");
   glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
@@ -248,46 +308,46 @@ int main(void) {
   GLuint focus_dist_loc = glGetUniformLocation(program, "focus_dist");
   glUniform1f(focus_dist_loc, cam.focus_dist);
 
-  const int sphere_count = 5;
-  const int lambert_count = 2;
-  const int metal_count = 1;
-  const int glass_count = 2;
-  Sphere spheres[100];
-  Lambert lamberts[100];
-  Metal metals[100];
-  Glass glass[100];
+  int gmat = make_glass(1.5);
 
-  vec3_set(lamberts[0].albedo, 0.13157895, 0.337254902, 0.08235294118);
-  vec3_set(lamberts[1].albedo, 0.1, 0.2, 0.5);
-  vec3_set(metals[0].albedo, 0.8, 0.6, 0.2);
-  metals[0].fuzz = 0.2;
-  glass[0].index = 1.5;
-  glass[1].index = 1.0 / 1.5;
+  // ground
+  int ground_mat = make_lambert((vec3){0.5, 0.5, 0.5});
+  make_sphere((vec3){0.0, -1000.0, 0.0}, 1000.0, LAMBERT, ground_mat);
 
-  vec3_set(spheres[0].center, 0.0, -100.5, -1.0);
-  spheres[0].radius = 100.0;
-  spheres[0].mat.type = LAMBERT;
-  spheres[0].mat.id = 0;
+  make_sphere((vec3){0.0, 1.0, 0.0}, 1.0, GLASS, gmat);
+  make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert((vec3){0.4, 0.2, 0.1}));
+  make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal((vec3){0.7, 0.6, 0.5}, 0.0));
 
-  vec3_set(spheres[1].center, 0.0, 0.0, -1.2);
-  spheres[1].radius = 0.5;
-  spheres[1].mat.type = LAMBERT;
-  spheres[1].mat.id = 1;
+  for (int a = -5; a < 5; a++) {
+    for (int b = -5; b < 5; b++) {
+      float choose_mat = randf();
+      vec3 center;
+      vec3_set(center, a + 0.9*randf(), 0.2, b + 0.9*randf());
 
-  vec3_set(spheres[2].center, -1.0, 0.0, -1.0);
-  spheres[2].radius = 0.5;
-  spheres[2].mat.type = GLASS;
-  spheres[2].mat.id = 0;
-
-  vec3_set(spheres[3].center, -1.0, 0.0, -1.0);
-  spheres[3].radius = 0.45;
-  spheres[3].mat.type = GLASS;
-  spheres[3].mat.id = 1;
-
-  vec3_set(spheres[4].center, 1.0, 0.0, -1.0);
-  spheres[4].radius = 0.5;
-  spheres[4].mat.type = METAL;
-  spheres[4].mat.id = 0;
+      vec3 tmp;
+      vec3_sub(tmp, center, (vec3){4.0, 0.2, 0.0});
+      if (vec3_len(tmp) > 0.9) {
+        if (choose_mat < 0.8) {
+          // diffuse
+          vec3 r, c;
+          vec3_rand(r);
+          vec3_rand(c);
+          vec3_mul(c, c, r);
+          make_sphere(center, 0.2, LAMBERT, make_lambert(c));
+        } else if (choose_mat < 0.95) {
+          // metal
+          vec3 r, c;
+          vec3_rand(r);
+          vec3_rand(c);
+          vec3_mul(c, c, r);
+          make_sphere(center, 0.2, METAL, make_metal(c, randf()*0.5));
+        } else {
+          // glass
+          make_sphere(center, 0.2, GLASS, gmat);
+        }
+      }
+    }
+  }
 
   GLuint sphere_count_loc = glGetUniformLocation(program, "sphere_count");
   glUniform1i(sphere_count_loc, sphere_count);
@@ -297,9 +357,9 @@ int main(void) {
   GLuint sph_buf;
   glGenBuffers(1, &sph_buf);
   glBindBuffer(GL_UNIFORM_BUFFER, sph_buf);
-  glBufferData(GL_UNIFORM_BUFFER, sizeof(Sphere)*100, NULL, GL_STATIC_DRAW);
+  glBufferData(GL_UNIFORM_BUFFER, sizeof(Sphere)*MAX_OBJS, NULL, GL_STATIC_DRAW);
   glBindBufferBase(GL_UNIFORM_BUFFER, 0, sph_buf);
-  glBindBufferRange(GL_UNIFORM_BUFFER, 2, sph_buf, 0, sizeof(Sphere)*100);
+  glBindBufferRange(GL_UNIFORM_BUFFER, 2, sph_buf, 0, sizeof(Sphere)*MAX_OBJS);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
@@ -309,18 +369,18 @@ int main(void) {
   glGenBuffers(1, &mat_buf);
   glBindBuffer(GL_UNIFORM_BUFFER, mat_buf);
   glBufferData(GL_UNIFORM_BUFFER,
-               sizeof(Lambert)*100+sizeof(Metal)*100+sizeof(Glass)*100,
+               sizeof(Lambert)*MAX_OBJS+sizeof(Metal)*MAX_OBJS+sizeof(Glass)*MAX_OBJS,
                NULL, GL_STATIC_DRAW);
   glBindBufferBase(GL_UNIFORM_BUFFER, 1, mat_buf);
   glBindBufferRange(GL_UNIFORM_BUFFER, 2, mat_buf, 0,
-                    sizeof(Lambert)*100 + sizeof(Metal)*100 + sizeof(Glass)*100);
+                    sizeof(Lambert)*MAX_OBJS + sizeof(Metal)*MAX_OBJS + sizeof(Glass)*MAX_OBJS);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Lambert)*lambert_count, lamberts);
   glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(Lambert)*100,
+                  sizeof(Lambert)*MAX_OBJS,
                   sizeof(Metal)*metal_count,
                   metals);
   glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(Lambert)*100 + sizeof(Metal)*100,
+                  sizeof(Lambert)*MAX_OBJS + sizeof(Metal)*MAX_OBJS,
                   sizeof(Glass)*glass_count,
                   glass);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);

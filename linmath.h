@@ -37,6 +37,12 @@ LINMATH_H_FUNC void vec##n##_scale(vec##n r, vec##n const v, float const s) \
 	for(i=0; i<n; ++i) \
 		r[i] = v[i] * s; \
 } \
+LINMATH_H_FUNC void vec##n##_mul(vec##n r, vec##n const a, vec##n const b) \
+{ \
+	int i; \
+	for(i=0; i<n; ++i) \
+		r[i] = b[i]*a[i]; \
+} \
 LINMATH_H_FUNC float vec##n##_mul_inner(vec##n const a, vec##n const b) \
 { \
 	float p = 0.f; \

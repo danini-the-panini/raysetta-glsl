@@ -1,6 +1,8 @@
 #version 410
 precision highp float;
 
+#define MAX_OBJ 200
+
 const float PI = 3.1415926535897932385;
 
 const float pos_inf = 1.0/0.0;
@@ -82,13 +84,13 @@ struct Hit {
 };
 
 layout (std140) uniform ObjBlock {
-  Sphere spheres [100];
+  Sphere spheres [MAX_OBJ];
 };
 
 layout (std140) uniform MatBlock {
-  Lambert lamberts [100];
-  Metal metals [100];
-  Glass glass [100];
+  Lambert lamberts [MAX_OBJ];
+  Metal metals [MAX_OBJ];
+  Glass glass [MAX_OBJ];
 };
 
 uniform int sphere_count;
