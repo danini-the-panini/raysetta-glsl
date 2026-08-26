@@ -11,14 +11,40 @@
 #define WIDTH 400
 #define HEIGHT 200
 
+#define LAMBERT 0
+#define METAL 1
+
 typedef struct vec3 {
   float x; float y; float z;
 } Vec3;
 
+static inline Vec3 vec3(float x, float y, float z) {
+  return (Vec3){.x=x,.y=y,.z=z};
+}
+
+typedef struct material {
+  int id;
+  int type;
+  float __0;
+  float __1;
+} Material;
+
 typedef struct sphere {
   Vec3 center;
   float radius;
+  Material mat;
 } Sphere;
+
+typedef struct lambert {
+  Vec3 albedo;
+  float __0;
+} Lambert;
+
+typedef struct metal {
+  Vec3 albedo;
+  float fuzz;
+} Metal;
+
 
 static inline void sph_set_center(Sphere *sph, float x, float y, float z) {
   sph->center.x = x;
@@ -166,31 +192,65 @@ int main(void) {
   GLuint cam_eye_loc = glGetUniformLocation(program, "cam_eye");
   glUniform3f(cam_eye_loc, cam_eye.x, cam_eye.y, cam_eye.z);
 
-  const int sphere_count = 2;
+  const int sphere_count = 4;
+  const int lambert_count = 2;
+  const int metal_count = 2;
   Sphere spheres[100];
+  Lambert lamberts[100];
+  Metal metals[100];
 
-  sph_set_center(&spheres[0], 0.0, 0.0, -1.0);
-  spheres[0].radius = 0.5;
+  lamberts[0].albedo = vec3(0.8, 0.8, 0.0);
+  lamberts[1].albedo = vec3(0.1, 0.2, 0.5);
+  metals[0].albedo = vec3(0.8, 0.8, 0.8);
+  metals[0].fuzz = 0.3;
+  metals[1].albedo = vec3(0.8, 0.6, 0.2);
+  metals[1].fuzz = 1.0;
 
-  sph_set_center(&spheres[1], 0.0, -100.5, -1.0);
-  spheres[1].radius = 100.0;
+  sph_set_center(&spheres[0], 0.0, -100.5, -1.0);
+  spheres[0].radius = 100.0;
+  spheres[0].mat.type =LAMBERT;
+  spheres[0].mat.id = 0;
+
+  sph_set_center(&spheres[1], 0.0, 0.0, -1.2);
+  spheres[1].radius = 0.5;
+  spheres[1].mat.type = LAMBERT;
+  spheres[1].mat.id = 1;
+
+  sph_set_center(&spheres[2], -1.0, 0.0, -1.0);
+  spheres[2].radius = 0.5;
+  spheres[2].mat.type = METAL;
+  spheres[2].mat.id = 0;
+
+  sph_set_center(&spheres[3], 1.0, 0.0, -1.0);
+  spheres[3].radius = 0.5;
+  spheres[3].mat.type = METAL;
+  spheres[3].mat.id = 1;
 
   GLuint sphere_count_loc = glGetUniformLocation(program, "sphere_count");
   glUniform1i(sphere_count_loc, sphere_count);
 
+  GLuint sph_loc = glGetUniformBlockIndex(program, "ObjBlock");
+  glUniformBlockBinding(program, sph_loc, 0);
   GLuint sph_buf;
   glGenBuffers(1, &sph_buf);
   glBindBuffer(GL_UNIFORM_BUFFER, sph_buf);
   glBufferData(GL_UNIFORM_BUFFER, sizeof(Sphere)*100, NULL, GL_STATIC_DRAW);
-  glBindBuffer(GL_UNIFORM_BUFFER, 0);
-
-  GLuint sph_loc = glGetUniformBlockIndex(program, "ObjectBloc");
-  glUniformBlockBinding(program, sph_loc, 0);
-
   glBindBufferBase(GL_UNIFORM_BUFFER, 0, sph_buf);
   glBindBufferRange(GL_UNIFORM_BUFFER, 2, sph_buf, 0, sizeof(Sphere)*100);
-
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  GLuint mat_loc = glGetUniformBlockIndex(program, "MatBlock");
+  glUniformBlockBinding(program, mat_loc, 1);
+  GLuint mat_buf;
+  glGenBuffers(1, &mat_buf);
+  glBindBuffer(GL_UNIFORM_BUFFER, mat_buf);
+  glBufferData(GL_UNIFORM_BUFFER, sizeof(Lambert)*100+sizeof(Metal)*100, NULL, GL_STATIC_DRAW);
+  glBindBufferBase(GL_UNIFORM_BUFFER, 1, mat_buf);
+  glBindBufferRange(GL_UNIFORM_BUFFER, 2, mat_buf, 0, sizeof(Lambert)*lambert_count + sizeof(Metal)*100);
+  glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Lambert)*100, lamberts);
+  glBufferSubData(GL_UNIFORM_BUFFER, sizeof(Lambert)*100, sizeof(Metal)*metal_count, metals);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();

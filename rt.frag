@@ -16,6 +16,65 @@ uniform sampler1D noise;
 uniform float time;
 uniform uint utime;
 
+#define LAMBERT 0
+#define METAL 1
+
+vec2 scr;
+float aspect;
+float focal_length;
+float vp_height;
+float vp_width;
+
+vec3 vp_u;
+vec3 vp_v;
+
+vec3 px_du;
+vec3 px_dv;
+
+vec3 vp_upleft;
+vec3 px00;
+
+struct Lambert {
+  vec3 albedo;
+};
+
+struct Metal {
+  vec3 albedo;
+  float fuzz;
+};
+
+struct Material {
+  int id;
+  int type;
+};
+
+struct Sphere {
+  vec3 center;
+  float radius;
+  Material mat;
+};
+
+struct Hit {
+  float t;
+  bool front;
+  vec3 p;
+  vec3 n;
+  Material mat;
+};
+
+layout (std140) uniform ObjBlock {
+  Sphere spheres [100];
+};
+
+layout (std140) uniform MatBlock {
+  Lambert lamberts [100];
+  Metal metals [100];
+};
+
+uniform int sphere_count;
+in vec2 uv;
+layout (location = 0) out vec4 outColor;
+
 int rand_index;
 float rand() {
   vec4 r = texture(noise, float(rand_index) / float(noise_size) + 0.5);
@@ -60,6 +119,10 @@ vec3 sample_square(vec2 st) {
   return vec3(rand() - 0.5, rand() - 0.5, 0.0);
 }
 
+bool nearz(vec3 v) {
+  return abs(v.x) < 1e-6 && abs(v.y) < 1e-6 && abs(v.z) < 1e-6;
+}
+
 struct Ray {
   vec3 orig;
   vec3 dir;
@@ -84,26 +147,6 @@ float clamp(Range self, float x) {
   return x;
 }
 
-struct Hit {
-  float t;
-  bool front;
-  vec3 p;
-  vec3 n;
-};
-
-struct Sphere {
-  vec3 center;
-  float radius;
-};
-
-layout (std140) uniform ObjectBlock {
-  Sphere spheres [100];
-};
-
-uniform int sphere_count;
-in vec2 uv;
-layout (location = 0) out vec4 outColor;
-
 vec3 ray_at(Ray self, float t) {
   return self.orig + t*self.dir;
 }
@@ -111,6 +154,33 @@ vec3 ray_at(Ray self, float t) {
 void set_face_normal(Ray ray, vec3 n, inout Hit hit) {
   hit.front = dot(ray.dir, n) < 0.0;
   hit.n = hit.front ? n : -n;
+}
+
+bool scat_lambert(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
+  Lambert mat = lamberts[hit.mat.id];
+  vec3 scat_dir = hit.n + rand_unit();
+  if (nearz(scat_dir)) scat_dir = hit.n;
+  scat = Ray(hit.p, scat_dir);
+  att = mat.albedo;
+  return true;
+}
+
+bool scat_metal(Ray ray_in, Hit hit, out vec3 att, out Ray scat) {
+  Metal mat = metals[hit.mat.id];
+  vec3 r = normalize(reflect(ray_in.dir, hit.n)) + (mat.fuzz * rand_unit());
+  scat = Ray(hit.p, r);
+  att = mat.albedo;
+  return (dot(r, hit.n) > 0.0);
+}
+
+bool scat(Ray ray_in, Hit hit, out vec3 att, out Ray scat) {
+  if (hit.mat.type == LAMBERT) {
+    return scat_lambert(ray_in, hit, att, scat);
+  } else if (hit.mat.type == METAL) {
+    return scat_metal(ray_in, hit, att, scat);
+  } else {
+    return false;
+  }
 }
 
 bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
@@ -138,6 +208,7 @@ bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
   hit.p = point;
   vec3 n = (point - self.center) / self.radius;
   set_face_normal(ray, n, hit);
+  hit.mat = self.mat;
 
   return true;
 }
@@ -158,21 +229,6 @@ bool hit_world(Ray ray, Range ray_t, out Hit hit) {
   return did_hit;
 }
 
-vec2 scr;
-float aspect;
-float focal_length;
-float vp_height;
-float vp_width;
-
-vec3 vp_u;
-vec3 vp_v;
-
-vec3 px_du;
-vec3 px_dv;
-
-vec3 vp_upleft;
-vec3 px00;
-
 Ray get_ray() {
   vec3 offset = sample_square(uv);
   vec3 px_sample = px00 + ((scr.x + offset.x) * px_du) + ((scr.y + offset.y) * px_dv);
@@ -185,9 +241,11 @@ Ray get_ray() {
 bool ray_color1(Ray ray, out Ray ray2, out vec3 col) {
   Hit hit;
   if (hit_world(ray, Range(0.001, pos_inf), hit)) {
-    vec3 dir = hit.n + rand_unit();
-    ray2 = Ray(hit.p, dir);
-    return true;
+    if (scat(ray, hit, col, ray2)) {
+      return true;
+    }
+    col = vec3(0.0);
+    return false;
   }
   vec3 unit_dir = normalize(ray.dir);
   float a = 0.5*(unit_dir.y + 1.0);
@@ -197,14 +255,14 @@ bool ray_color1(Ray ray, out Ray ray2, out vec3 col) {
 
 vec3 ray_color(Ray ray) {
   Ray ray2 = ray;
-  float mul = 1.0;
+  vec3 att = vec3(1.0, 1.0, 1.0);
   for (int i = 0; i < 10; i++) {
     vec3 col;
     if (ray_color1(ray, ray2, col)) {
-      mul *= 0.5;
+      att *= col;
       ray = ray2;
     } else {
-      return col*mul;
+      return col*att;
     }
   }
   return vec3(0.0, 0.0, 0.0);
