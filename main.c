@@ -115,10 +115,16 @@ float randf_r(float min, float max) {
   return min + (max-min)*randf();
 }
 
+static bool clear = true;
 static Camera cam;
 static double last_mouse[2];
 static float orbit_max = 100.0;
 static float orbit_min = 0.1;
+static GLuint frame = 0;
+
+void on_resize(GLFWwindow *win, int w, int h) {
+  clear = true;
+}
 
 void on_mouse_move(GLFWwindow *win, double x, double y) {
   float dx = x - last_mouse[0];
@@ -127,6 +133,7 @@ void on_mouse_move(GLFWwindow *win, double x, double y) {
   if (glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_1) == GLFW_PRESS) {
     float speed = 0.01;
     rotate_around_with_fixed_up(&cam, cam.tgt, speed * dx, speed * dy);
+    clear = true;
   }
 
   last_mouse[0] = x;
@@ -139,6 +146,7 @@ void on_scroll(GLFWwindow *win, double dx, double dy) {
   float dist = vec3_len(vw);
   float zoom = dist * (1.0 - expf(-dy * 0.01));
   zoom_towards(&cam, cam.tgt, zoom, orbit_min, orbit_max);
+  clear = true;
 }
 
 int main(void) {
@@ -160,6 +168,8 @@ int main(void) {
   printf("MAX TEX: %i\n", max_tex);
 
   glEnable(GL_FRAMEBUFFER_SRGB);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
   float *noise = malloc(sizeof(float)*max_tex);
   for (GLsizei i = 0; i < max_tex; i++) {
@@ -189,6 +199,7 @@ int main(void) {
 
   GLuint time_loc = glGetUniformLocation(program, "time");
   GLuint utime_loc = glGetUniformLocation(program, "utime");
+  GLuint frame_loc = glGetUniformLocation(program, "frame");
 
   GLuint noise_tex = 0;
   glGenTextures(1, &noise_tex);
@@ -199,6 +210,7 @@ int main(void) {
   glTexStorage1D(GL_TEXTURE_1D, 1, GL_R32F, max_tex);
   glTexSubImage1D(GL_TEXTURE_1D, 0, 0, max_tex, GL_RED, GL_FLOAT, noise);
   glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_1D, 0);
 
   GLuint noise_loc = glGetUniformLocation(program, "noise");
   GLuint noise_size_loc = glGetUniformLocation(program, "noise_size");
@@ -315,15 +327,13 @@ int main(void) {
 
   glfwGetCursorPos(window, &last_mouse[0], &last_mouse[1]);
 
+  glfwSetFramebufferSizeCallback(window, on_resize);
   glfwSetCursorPosCallback(window, on_mouse_move);
   glfwSetScrollCallback(window, on_scroll);
 
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
 
-    int w, h;
-    glfwGetWindowSize(window,&w, &h);
-    glUniform2f(res_loc, w, h);
     float t = glfwGetTime();
     glUniform1f(time_loc, t);
     glUniform1ui(utime_loc, (GLuint)t);
@@ -333,10 +343,24 @@ int main(void) {
     for (GLsizei i = 0; i < max_tex; i++) {
       noise[i] = randf();
     }
+    glBindTexture(GL_TEXTURE_1D, noise_tex);
     glTexSubImage1D(GL_TEXTURE_1D, 0, 0, max_tex, GL_RED, GL_FLOAT, noise);
 
-    glClearColor(0.7f, 0.9f, 0.1f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    if (clear) {
+      glClearColor(0.7f, 0.9f, 0.1f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT);
+      int w, h;
+      glfwGetWindowSize(window,&w, &h);
+      glViewport(0, 0, w, h);
+      glUniform2f(res_loc, w, h);
+      clear = false;
+      frame = 0;
+    } else {
+      glClear(GL_DEPTH_BUFFER_BIT);
+    }
+
+    glUniform1ui(frame_loc, frame);
+    frame++;
 
     glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);

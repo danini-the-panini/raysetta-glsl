@@ -21,6 +21,9 @@ uniform sampler1D noise;
 
 uniform float time;
 uniform uint utime;
+uniform uint frame;
+
+// uniform sampler2D prev;
 
 #define LAMBERT 0
 #define METAL 1
@@ -359,5 +362,5 @@ void main() {
   for (int s = 0; s < samples; s++) {
     px_col = px_col + ray_color(get_ray());
   }
-  outColor = vec4(px_col * sample_scale, 1.0);
+  outColor = vec4(px_col * sample_scale, frame == 0 ? 1.0 : 1.0/frame);
 }
