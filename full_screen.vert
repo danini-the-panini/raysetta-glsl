@@ -1,4 +1,5 @@
-#version 330
+#version 410
+precision highp float;
 
 out vec2 uv;
 void main()

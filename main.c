@@ -10,6 +10,17 @@
 #define WIDTH 400
 #define HEIGHT 200
 
+typedef struct sphere {
+  struct { float x; float y; float z; } center;
+  float radius;
+} Sphere;
+
+static inline void sph_set_center(Sphere *sph, float x, float y, float z) {
+  sph->center.x = x;
+  sph->center.y = y;
+  sph->center.z = z;
+}
+
 static bool load_shader(const char *filename, GLenum type, GLuint *ret) {
   FILE *file = fopen(filename, "r");
   if (!file) {
@@ -65,11 +76,11 @@ bool check_program(GLuint program) {
 int main(void) {
   glfwInit();
 
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-  GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT, "[glad] GL with GLFW", NULL, NULL);
+  GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT, "raysetta-gl", NULL, NULL);
   glfwMakeContextCurrent(window);
 
   int version = gladLoadGL(glfwGetProcAddress);
@@ -98,6 +109,34 @@ int main(void) {
 
   GLuint res_loc = glGetUniformLocation(program, "res");
   glUniform2f(res_loc, WIDTH, HEIGHT);
+
+  const int sphere_count = 2;
+  Sphere spheres[100];
+
+  sph_set_center(&spheres[0], 0.0, 0.0, -1.0);
+  spheres[0].radius = -0.5;
+
+  sph_set_center(&spheres[1], 0.0, -100.5, -1.0);
+  spheres[1].radius = 100.0;
+
+  GLuint sphere_count_loc = glGetUniformLocation(program, "sphere_count");
+  glUniform1i(sphere_count_loc, sphere_count);
+
+  GLuint sph_buf;
+  glGenBuffers(1, &sph_buf);
+  glBindBuffer(GL_UNIFORM_BUFFER, sph_buf);
+  glBufferData(GL_UNIFORM_BUFFER, sizeof(Sphere)*100, NULL, GL_STATIC_DRAW);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  GLuint sph_loc = glGetUniformBlockIndex(program, "ObjectBloc");
+  glUniformBlockBinding(program, sph_loc, 0);
+
+  glBindBufferBase(GL_UNIFORM_BUFFER, 0, sph_buf);
+  glBindBufferRange(GL_UNIFORM_BUFFER, 2, sph_buf, 0, sizeof(Sphere)*100);
+
+  glBindBuffer(GL_UNIFORM_BUFFER, sph_buf);
+  glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
