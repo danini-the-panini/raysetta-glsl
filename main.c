@@ -184,20 +184,30 @@ int main(void) {
   glUniform1i(noise_size_loc, max_tex);
 
   const int samples = 10;
+  const int depth = 10;
 
   GLuint samples_loc = glGetUniformLocation(program, "samples");
   glUniform1i(samples_loc, samples);
+  GLuint depth_loc = glGetUniformLocation(program, "depth");
+  glUniform1i(depth_loc, depth);
 
   GLuint res_loc = glGetUniformLocation(program, "res");
   glUniform2f(res_loc, WIDTH, HEIGHT);
 
-  Vec3 cam_eye;
-  cam_eye.x = 0.0;
-  cam_eye.y = 0.0;
-  cam_eye.z = 0.0;
+  Vec3 eye = vec3(-2.0, 2.0, 1.0);
+  Vec3 tgt = vec3(0.0, 0.0, -1.0);
+  Vec3 vup = vec3(0.0, 1.0, 0.0);
 
-  GLuint cam_eye_loc = glGetUniformLocation(program, "cam_eye");
-  glUniform3f(cam_eye_loc, cam_eye.x, cam_eye.y, cam_eye.z);
+  float vfov = 20.0;
+
+  GLuint eye_loc = glGetUniformLocation(program, "eye");
+  glUniform3f(eye_loc, eye.x, eye.y, eye.z);
+  GLuint tgt_loc = glGetUniformLocation(program, "tgt");
+  glUniform3f(tgt_loc, tgt.x, tgt.y, tgt.z);
+  GLuint vup_loc = glGetUniformLocation(program, "vup");
+  glUniform3f(vup_loc, vup.x, vup.y, vup.z);
+  GLuint vfov_loc = glGetUniformLocation(program, "vfov");
+  glUniform1f(vfov_loc, vfov);
 
   const int sphere_count = 5;
   const int lambert_count = 2;

@@ -7,8 +7,12 @@ const float pos_inf = 1e38;
 const float neg_inf = -1e38;
 
 uniform vec2 res;
-uniform vec3 cam_eye;
+uniform vec3 eye;
+uniform vec3 tgt;
+uniform vec3 vup;
+uniform float vfov;
 uniform int samples;
+uniform int depth;
 
 uniform int noise_size;
 uniform sampler1D noise;
@@ -22,9 +26,7 @@ uniform uint utime;
 
 vec2 scr;
 float aspect;
-float focal_length;
-float vp_height;
-float vp_width;
+float flen;
 
 vec3 vp_u;
 vec3 vp_v;
@@ -34,6 +36,10 @@ vec3 px_dv;
 
 vec3 vp_upleft;
 vec3 px00;
+
+vec3 cu;
+vec3 cv;
+vec3 cw;
 
 struct Lambert {
   vec3 albedo;
@@ -268,7 +274,7 @@ bool hit_world(Ray ray, Range ray_t, out Hit hit) {
 Ray get_ray() {
   vec3 offset = sample_square(uv);
   vec3 px_sample = px00 + ((scr.x + offset.x) * px_du) + ((scr.y + offset.y) * px_dv);
-  vec3 ray_orig = cam_eye;
+  vec3 ray_orig = eye;
   vec3 ray_dir = px_sample - ray_orig;
 
   return Ray(ray_orig, ray_dir);
@@ -292,7 +298,7 @@ bool ray_color1(Ray ray, out Ray ray2, out vec3 col) {
 vec3 ray_color(Ray ray) {
   Ray ray2 = ray;
   vec3 att = vec3(1.0, 1.0, 1.0);
-  for (int i = 0; i < 10; i++) {
+  for (int i = 0; i < depth; i++) {
     vec3 col;
     if (ray_color1(ray, ray2, col)) {
       att *= col;
@@ -310,17 +316,23 @@ void main() {
   scr = uv * res;
 
   aspect = res.x / res.y;
-  focal_length = 1.0;
-  vp_height = 2.0;
-  vp_width = vp_height * aspect;
+  flen = distance(eye, tgt);
+  float theta = radians(vfov);
+  float h = tan(theta/2.0);
+  float vp_h = 2.0 * h * flen;
+  float vp_w = vp_h * aspect;
 
-  vp_u = vec3(vp_width, 0.0, 0.0);
-  vp_v = vec3(0.0, -vp_height, 0.0);
+  cw = normalize(eye - tgt);
+  cu = normalize(cross(vup, cw));
+  cv = cross(cw, cu);
+
+  vp_u = vp_w*cu;
+  vp_v = vp_h*-cv;
 
   px_du = vp_u / res.x;
   px_dv = vp_v / res.y;
 
-  vp_upleft = cam_eye - vec3(0.0, 0.0, focal_length) - vp_u/2.0 - vp_v/2.0;
+  vp_upleft = eye - (flen*cw) - vp_u/2.0 - vp_v/2.0;
   px00 = vp_upleft + 0.5 * (px_du + px_dv);
 
   float sample_scale = 1.0 / float(samples);
