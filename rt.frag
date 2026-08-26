@@ -1,13 +1,51 @@
 #version 410
 precision highp float;
 
-const float pos_inf = 3e10;
-const float neg_inf = -3e10;
+const float pos_inf = 1e38;
+const float neg_inf = -1e38;
+
+uniform vec2 res;
+uniform vec3 cam_eye;
+uniform int samples;
+
+uniform int noise_size;
+uniform sampler1D noise;
+
+int rand_index;
+
+float rand() {
+  vec4 r = texture(noise, float(rand_index) / float(noise_size) + 0.5);
+  rand_index++;
+  return r.x;
+}
+
+vec3 sample_square(vec2 st) {
+  return vec3(rand() - 0.5, rand() - 0.5, 0.0);
+}
 
 struct Ray {
   vec3 orig;
   vec3 dir;
 };
+
+struct Range {
+  float min;
+  float max;
+};
+
+float length(Range self) {
+  return self.max - self.min;
+}
+
+bool surrounds(Range self, float x) {
+  return self.min < x && x < self.max;
+}
+
+float clamp(Range self, float x) {
+  if (x < self.min) return self.min;
+  if (x > self.max) return self.max;
+  return x;
+}
 
 struct Hit {
   float t;
@@ -26,7 +64,6 @@ layout (std140) uniform ObjectBlock {
 };
 
 uniform int sphere_count;
-uniform vec2 res;
 in vec2 uv;
 layout (location = 0) out vec4 outColor;
 
@@ -39,7 +76,7 @@ void set_face_normal(Ray ray, vec3 n, inout Hit hit) {
   hit.n = hit.front ? n : -n;
 }
 
-bool hit_sphere(Sphere self, Ray ray, float ray_tmin, float ray_tmax, out Hit hit) {
+bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
   vec3 oc = self.center - ray.orig;
   float a = dot(ray.dir, ray.dir);
   float h = dot(ray.dir, oc);
@@ -52,9 +89,9 @@ bool hit_sphere(Sphere self, Ray ray, float ray_tmin, float ray_tmax, out Hit hi
 
   float sqrtd = sqrt(d);
   float root = (h - sqrtd) / a;
-  if (root <= ray_tmin || ray_tmax <= root) {
+  if (!surrounds(ray_t, root)) {
     root = (h + sqrtd) / a;
-    if (root <= ray_tmin || ray_tmax <= root) {
+    if (!surrounds(ray_t, root)) {
         return false;
     }
   }
@@ -72,13 +109,13 @@ bool notfin(float v) {
   return isinf(v) || isnan(v);
 }
 
-bool hit_world(Ray ray, float ray_tmin, float ray_tmax, out Hit hit) {
+bool hit_world(Ray ray, Range ray_t, out Hit hit) {
   Hit tmp;
   bool did_hit = false;
-  float closest = ray_tmax;
+  float closest = ray_t.max;
 
   for (int i = 0; i < sphere_count; i++) {
-    if (hit_sphere(spheres[i], ray, ray_tmin, closest, tmp)) {
+    if (hit_sphere(spheres[i], ray, Range(ray_t.min, closest), tmp)) {
       did_hit = true;
       closest = tmp.t;
       hit = tmp;
@@ -88,9 +125,33 @@ bool hit_world(Ray ray, float ray_tmin, float ray_tmax, out Hit hit) {
   return did_hit;
 }
 
+vec2 scr;
+float aspect;
+float focal_length;
+float vp_height;
+float vp_width;
+
+vec3 vp_u;
+vec3 vp_v;
+
+vec3 px_du;
+vec3 px_dv;
+
+vec3 vp_upleft;
+vec3 px00;
+
+Ray get_ray() {
+  vec3 offset = sample_square(uv);
+  vec3 px_sample = px00 + ((scr.x + offset.x) * px_du) + ((scr.y + offset.y) * px_dv);
+  vec3 ray_orig = cam_eye;
+  vec3 ray_dir = px_sample - ray_orig;
+
+  return Ray(ray_orig, ray_dir);
+}
+
 vec3 ray_color(Ray ray) {
   Hit hit;
-  if (hit_world(ray, 0.0, pos_inf, hit)) {
+  if (hit_world(ray, Range(0.0, pos_inf), hit)) {
     return 0.5 * (hit.n + vec3(1.0, 1.0, 1.0));
   }
   vec3 unit_dir = normalize(ray.dir);
@@ -99,25 +160,28 @@ vec3 ray_color(Ray ray) {
 }
 
 void main() {
-  vec2 scr = uv * res;
+  rand_index = int(floor(gl_FragCoord.x) + floor(res.x * gl_FragCoord.y)) % noise_size;
 
-  float aspect = res.x / res.y;
-  float focal_length = 1.0;
-  float vp_height = 2.0;
-  float vp_width = vp_height * aspect;
-  vec3 cam_eye = vec3(0.0, 0.0, 0.0);
+  scr = uv * res;
 
-  vec3 vp_u = vec3(vp_width, 0.0, 0.0);
-  vec3 vp_v = vec3(0.0, -vp_height, 0.0);
+  aspect = res.x / res.y;
+  focal_length = 1.0;
+  vp_height = 2.0;
+  vp_width = vp_height * aspect;
 
-  vec3 px_du = vp_u / res.x;
-  vec3 px_dv = vp_v / res.y;
+  vp_u = vec3(vp_width, 0.0, 0.0);
+  vp_v = vec3(0.0, -vp_height, 0.0);
 
-  vec3 vp_upleft = cam_eye - vec3(0.0, 0.0, focal_length) - vp_u/2.0 - vp_v/2.0;
-  vec3 px00 = vp_upleft + 0.5 * (px_du + px_dv);
+  px_du = vp_u / res.x;
+  px_dv = vp_v / res.y;
 
-  vec3 px = px00 + (scr.x * px_du) + (scr.y * px_dv);
-  vec3 ray_dir = px - cam_eye;
+  vp_upleft = cam_eye - vec3(0.0, 0.0, focal_length) - vp_u/2.0 - vp_v/2.0;
+  px00 = vp_upleft + 0.5 * (px_du + px_dv);
 
-  outColor = vec4(ray_color(Ray(cam_eye, ray_dir)), 1.0);
+  float sample_scale = 1.0 / float(samples);
+  vec3 px_col = vec3(0.0, 0.0, 0.0);
+  for (int s = 0; s < samples; s++) {
+    px_col = px_col + ray_color(get_ray());
+  }
+  outColor = vec4(px_col * sample_scale, 1.0);
 }

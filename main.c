@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <time.h>
 
 #define GLAD_GL_IMPLEMENTATION
 #include "gl.h"
@@ -74,6 +75,7 @@ bool check_program(GLuint program) {
 }
 
 int main(void) {
+  srand(time(NULL));
   glfwInit();
 
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -85,6 +87,15 @@ int main(void) {
 
   int version = gladLoadGL(glfwGetProcAddress);
   printf("GL %d.%d\n", GLAD_VERSION_MAJOR(version), GLAD_VERSION_MINOR(version));
+
+  GLsizei max_tex = 0;
+  glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
+  printf("MAX TEX: %i\n", max_tex);
+
+  float *noise = malloc(sizeof(float)*max_tex);
+  for (GLsizei i = 0; i < max_tex; i++) {
+    noise[i] = (float)rand() / (float)RAND_MAX;
+  }
 
   GLuint vao;
   glGenVertexArrays(1, &vao);
@@ -107,8 +118,31 @@ int main(void) {
 
   glUseProgram(program);
 
+  GLuint noise_tex = 0;
+  glGenTextures(1, &noise_tex);
+  glBindTexture(GL_TEXTURE_1D, noise_tex);
+  glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_REPEAT);	
+  glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexStorage1D(GL_TEXTURE_1D, 1, GL_R32F, max_tex);
+  glTexSubImage1D(GL_TEXTURE_1D, 0, 0, max_tex, GL_RED, GL_FLOAT, noise);
+  glActiveTexture(GL_TEXTURE0);
+
+  GLuint noise_loc = glGetUniformLocation(program, "noise");
+  GLuint noise_size_loc = glGetUniformLocation(program, "noise_size");
+  glUniform1i(noise_loc, 0);
+  glUniform1i(noise_size_loc, max_tex);
+
+  const int samples = 5;
+
+  GLuint samples_loc = glGetUniformLocation(program, "samples");
+  glUniform1i(samples_loc, samples);
+
   GLuint res_loc = glGetUniformLocation(program, "res");
   glUniform2f(res_loc, WIDTH, HEIGHT);
+
+  GLuint cam_eye_loc = glGetUniformLocation(program, "cam_eye");
+  glUniform3f(cam_eye_loc, 0.0, 0.0, 0.0);
 
   const int sphere_count = 2;
   Sphere spheres[100];
@@ -145,6 +179,11 @@ int main(void) {
     glfwGetWindowSize(window,&w, &h);
     glUniform2f(res_loc, w, h);
 
+    for (GLsizei i = 0; i < max_tex; i++) {
+      noise[i] = (float)rand() / (float)RAND_MAX;
+    }
+    glTexSubImage1D(GL_TEXTURE_1D, 0, 0, max_tex, GL_RED, GL_FLOAT, noise);
+
     glClearColor(0.7f, 0.9f, 0.1f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -155,5 +194,7 @@ int main(void) {
   }
 
   glfwTerminate();
+
+  free(noise);
   return 0;
 }
