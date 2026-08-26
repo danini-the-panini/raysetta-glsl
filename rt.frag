@@ -18,6 +18,7 @@ uniform uint utime;
 
 #define LAMBERT 0
 #define METAL 1
+#define GLASS 2
 
 vec2 scr;
 float aspect;
@@ -41,6 +42,10 @@ struct Lambert {
 struct Metal {
   vec3 albedo;
   float fuzz;
+};
+
+struct Glass {
+  float index;
 };
 
 struct Material {
@@ -69,6 +74,7 @@ layout (std140) uniform ObjBlock {
 layout (std140) uniform MatBlock {
   Lambert lamberts [100];
   Metal metals [100];
+  Glass glass [100];
 };
 
 uniform int sphere_count;
@@ -165,19 +171,49 @@ bool scat_lambert(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   return true;
 }
 
-bool scat_metal(Ray ray_in, Hit hit, out vec3 att, out Ray scat) {
+bool scat_metal(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   Metal mat = metals[hit.mat.id];
-  vec3 r = normalize(reflect(ray_in.dir, hit.n)) + (mat.fuzz * rand_unit());
+  vec3 r = normalize(reflect(r_in.dir, hit.n)) + (mat.fuzz * rand_unit());
   scat = Ray(hit.p, r);
   att = mat.albedo;
   return (dot(r, hit.n) > 0.0);
 }
 
-bool scat(Ray ray_in, Hit hit, out vec3 att, out Ray scat) {
+float reflectance(float cosine, float ri) {
+  // Use Schlick's approximation for reflectance.
+  float r0 = (1.0 - ri) / (1.0 + ri);
+  r0 = r0*r0;
+  return r0 + (1.0-r0)*pow((1.0 - cosine), 5.0);
+}
+
+bool scat_glass(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
+  Glass mat = glass[hit.mat.id];
+  att = vec3(1.0, 1.0, 1.0);
+  float ri = hit.front ? (1.0 / mat.index) : mat.index;
+
+  vec3 unit = normalize(r_in.dir);
+  float cos_t = min(dot(-unit, hit.n), 1.0);
+  float sin_t = sqrt(1.0 - cos_t*cos_t);
+
+  vec3 dir;
+
+  if (ri * sin_t > 1.0 || reflectance(cos_t, ri) > rand()) {
+    dir = reflect(unit, hit.n);
+  } else {
+    dir = refract(unit, hit.n, ri);
+  }
+
+  scat = Ray(hit.p, dir);
+  return true;
+}
+
+bool scat(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   if (hit.mat.type == LAMBERT) {
-    return scat_lambert(ray_in, hit, att, scat);
+    return scat_lambert(r_in, hit, att, scat);
   } else if (hit.mat.type == METAL) {
-    return scat_metal(ray_in, hit, att, scat);
+    return scat_metal(r_in, hit, att, scat);
+  } else if (hit.mat.type == GLASS) {
+    return scat_glass(r_in, hit, att, scat);
   } else {
     return false;
   }
