@@ -136,8 +136,10 @@ vec3 sample_square(vec2 st) {
   return vec3(rand() - 0.5, rand() - 0.5, 0.0);
 }
 
-vec3 rand_unit_disk() {
-  return normalize(vec3(gauss(), 0.0));
+vec2 rand_unit_disk() {
+  float r = sqrt(rand());
+  float t = rand() * 2.0 * PI;
+  return vec2(r * cos(t), r * sin(t));
 }
 
 bool nearz(vec3 v) {
@@ -281,7 +283,7 @@ bool hit_world(Ray ray, Range ray_t, out Hit hit) {
 }
 
 vec3 defocus_disk_sample() {
-  vec3 p = rand_unit_disk();
+  vec2 p = rand_unit_disk();
   return eye + (p.x * df_u) + (p.y * df_v);
 }
 

@@ -245,7 +245,7 @@ int main(void) {
   Metal metals[100];
   Glass glass[100];
 
-  vec3_set(lamberts[0].albedo, 0.8, 0.8, 0.0);
+  vec3_set(lamberts[0].albedo, 0.13157895, 0.337254902, 0.08235294118);
   vec3_set(lamberts[1].albedo, 0.1, 0.2, 0.5);
   vec3_set(metals[0].albedo, 0.8, 0.6, 0.2);
   metals[0].fuzz = 0.2;
