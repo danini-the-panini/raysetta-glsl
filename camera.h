@@ -7,6 +7,8 @@ typedef struct camera {
   vec3 tgt;
   vec3 vup;
   float vfov;
+  float defocus_angle;
+  float focus_dist;
 } Camera;
 
 static inline void rodrigues(vec3 r, vec3 v, vec3 k, float cs, float sn) {

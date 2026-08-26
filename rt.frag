@@ -11,6 +11,8 @@ uniform vec3 eye;
 uniform vec3 tgt;
 uniform vec3 vup;
 uniform float vfov;
+uniform float defocus_angle;
+uniform float focus_dist;
 uniform int samples;
 uniform int depth;
 
@@ -40,6 +42,9 @@ vec3 px00;
 vec3 cu;
 vec3 cv;
 vec3 cw;
+
+vec3 df_u;
+vec3 df_v;
 
 struct Lambert {
   vec3 albedo;
@@ -129,6 +134,10 @@ vec3 rand_hemi(vec3 n) {
 
 vec3 sample_square(vec2 st) {
   return vec3(rand() - 0.5, rand() - 0.5, 0.0);
+}
+
+vec3 rand_unit_disk() {
+  return normalize(vec3(gauss(), 0.0));
 }
 
 bool nearz(vec3 v) {
@@ -271,10 +280,15 @@ bool hit_world(Ray ray, Range ray_t, out Hit hit) {
   return did_hit;
 }
 
+vec3 defocus_disk_sample() {
+  vec3 p = rand_unit_disk();
+  return eye + (p.x * df_u) + (p.y * df_v);
+}
+
 Ray get_ray() {
   vec3 offset = sample_square(uv);
   vec3 px_sample = px00 + ((scr.x + offset.x) * px_du) + ((scr.y + offset.y) * px_dv);
-  vec3 ray_orig = eye;
+  vec3 ray_orig = defocus_angle <= 0 ? eye : defocus_disk_sample();
   vec3 ray_dir = px_sample - ray_orig;
 
   return Ray(ray_orig, ray_dir);
@@ -316,10 +330,9 @@ void main() {
   scr = uv * res;
 
   aspect = res.x / res.y;
-  flen = distance(eye, tgt);
   float theta = radians(vfov);
   float h = tan(theta/2.0);
-  float vp_h = 2.0 * h * flen;
+  float vp_h = 2.0 * h * focus_dist;
   float vp_w = vp_h * aspect;
 
   cw = normalize(eye - tgt);
@@ -332,8 +345,12 @@ void main() {
   px_du = vp_u / res.x;
   px_dv = vp_v / res.y;
 
-  vp_upleft = eye - (flen*cw) - vp_u/2.0 - vp_v/2.0;
+  vp_upleft = eye - (focus_dist*cw) - vp_u/2.0 - vp_v/2.0;
   px00 = vp_upleft + 0.5 * (px_du + px_dv);
+
+  float df_r = focus_dist * tan(radians(defocus_angle / 2.0));
+  df_u = cu * df_r;
+  df_v = cv * df_r;
 
   float sample_scale = 1.0 / float(samples);
   vec3 px_col = vec3(0.0, 0.0, 0.0);

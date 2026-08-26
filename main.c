@@ -220,6 +220,8 @@ int main(void) {
   vec3_set(cam.tgt, 0.0, 0.0, -1.0);
   vec3_set(cam.vup, 0.0, 1.0, 0.0);
   cam.vfov = 45.0;
+  cam.defocus_angle = 2.0;
+  cam.focus_dist = 3.4;
 
   GLuint eye_loc = glGetUniformLocation(program, "eye");
   glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
@@ -229,6 +231,10 @@ int main(void) {
   glUniform3f(vup_loc, cam.vup[0], cam.vup[1], cam.vup[2]);
   GLuint vfov_loc = glGetUniformLocation(program, "vfov");
   glUniform1f(vfov_loc, cam.vfov);
+  GLuint defocus_angle_loc = glGetUniformLocation(program, "defocus_angle");
+  glUniform1f(defocus_angle_loc, cam.defocus_angle);
+  GLuint focus_dist_loc = glGetUniformLocation(program, "focus_dist");
+  glUniform1f(focus_dist_loc, cam.focus_dist);
 
   const int sphere_count = 5;
   const int lambert_count = 2;
