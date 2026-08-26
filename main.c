@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -8,20 +9,15 @@
 
 #include <GLFW/glfw3.h>
 
+#include "linmath.h"
+#include "camera.h"
+
 #define WIDTH 400
 #define HEIGHT 200
 
 #define LAMBERT 0
 #define METAL 1
 #define GLASS 2
-
-typedef struct vec3 {
-  float x; float y; float z;
-} Vec3;
-
-static inline Vec3 vec3(float x, float y, float z) {
-  return (Vec3){.x=x,.y=y,.z=z};
-}
 
 typedef struct material {
   int id;
@@ -31,18 +27,18 @@ typedef struct material {
 } Material;
 
 typedef struct sphere {
-  Vec3 center;
+  vec3 center;
   float radius;
   Material mat;
 } Sphere;
 
 typedef struct lambert {
-  Vec3 albedo;
+  vec3 albedo;
   float __0;
 } Lambert;
 
 typedef struct metal {
-  Vec3 albedo;
+  vec3 albedo;
   float fuzz;
 } Metal;
 
@@ -53,10 +49,10 @@ typedef struct glass {
   float __2;
 } Glass;
 
-static inline void sph_set_center(Sphere *sph, float x, float y, float z) {
-  sph->center.x = x;
-  sph->center.y = y;
-  sph->center.z = z;
+static inline void vec3_set(vec3 v, float x, float y, float z) {
+  v[0] = x;
+  v[1] = y;
+  v[2] = z;
 }
 
 static bool load_shader(const char *filename, GLenum type, GLuint *ret) {
@@ -117,6 +113,32 @@ float randf() {
 
 float randf_r(float min, float max) {
   return min + (max-min)*randf();
+}
+
+static Camera cam;
+static double last_mouse[2];
+static float orbit_max = 100.0;
+static float orbit_min = 0.1;
+
+void on_mouse_move(GLFWwindow *win, double x, double y) {
+  float dx = x - last_mouse[0];
+  float dy = y - last_mouse[1];
+
+  if (glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_1) == GLFW_PRESS) {
+    float speed = 0.01;
+    rotate_around_with_fixed_up(&cam, cam.tgt, speed * dx, speed * dy);
+  }
+
+  last_mouse[0] = x;
+  last_mouse[1] = y;
+}
+
+void on_scroll(GLFWwindow *win, double dx, double dy) {
+  vec3 vw;
+  vec3_sub(vw, cam.tgt, cam.eye);
+  float dist = vec3_len(vw);
+  float zoom = dist * (1.0 - expf(-dy * 0.01));
+  zoom_towards(&cam, cam.tgt, zoom, orbit_min, orbit_max);
 }
 
 int main(void) {
@@ -194,20 +216,19 @@ int main(void) {
   GLuint res_loc = glGetUniformLocation(program, "res");
   glUniform2f(res_loc, WIDTH, HEIGHT);
 
-  Vec3 eye = vec3(-2.0, 2.0, 1.0);
-  Vec3 tgt = vec3(0.0, 0.0, -1.0);
-  Vec3 vup = vec3(0.0, 1.0, 0.0);
-
-  float vfov = 20.0;
+  vec3_set(cam.eye, -2.0, 1.0, 1.0);
+  vec3_set(cam.tgt, 0.0, 0.0, -1.0);
+  vec3_set(cam.vup, 0.0, 1.0, 0.0);
+  cam.vfov = 45.0;
 
   GLuint eye_loc = glGetUniformLocation(program, "eye");
-  glUniform3f(eye_loc, eye.x, eye.y, eye.z);
+  glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
   GLuint tgt_loc = glGetUniformLocation(program, "tgt");
-  glUniform3f(tgt_loc, tgt.x, tgt.y, tgt.z);
+  glUniform3f(tgt_loc, cam.tgt[0], cam.tgt[1], cam.tgt[2]);
   GLuint vup_loc = glGetUniformLocation(program, "vup");
-  glUniform3f(vup_loc, vup.x, vup.y, vup.z);
+  glUniform3f(vup_loc, cam.vup[0], cam.vup[1], cam.vup[2]);
   GLuint vfov_loc = glGetUniformLocation(program, "vfov");
-  glUniform1f(vfov_loc, vfov);
+  glUniform1f(vfov_loc, cam.vfov);
 
   const int sphere_count = 5;
   const int lambert_count = 2;
@@ -218,34 +239,34 @@ int main(void) {
   Metal metals[100];
   Glass glass[100];
 
-  lamberts[0].albedo = vec3(0.8, 0.8, 0.0);
-  lamberts[1].albedo = vec3(0.1, 0.2, 0.5);
-  metals[0].albedo = vec3(0.8, 0.6, 0.2);
-  metals[0].fuzz = 1.0;
+  vec3_set(lamberts[0].albedo, 0.8, 0.8, 0.0);
+  vec3_set(lamberts[1].albedo, 0.1, 0.2, 0.5);
+  vec3_set(metals[0].albedo, 0.8, 0.6, 0.2);
+  metals[0].fuzz = 0.2;
   glass[0].index = 1.5;
   glass[1].index = 1.0 / 1.5;
 
-  sph_set_center(&spheres[0], 0.0, -100.5, -1.0);
+  vec3_set(spheres[0].center, 0.0, -100.5, -1.0);
   spheres[0].radius = 100.0;
   spheres[0].mat.type = LAMBERT;
   spheres[0].mat.id = 0;
 
-  sph_set_center(&spheres[1], 0.0, 0.0, -1.2);
+  vec3_set(spheres[1].center, 0.0, 0.0, -1.2);
   spheres[1].radius = 0.5;
   spheres[1].mat.type = LAMBERT;
   spheres[1].mat.id = 1;
 
-  sph_set_center(&spheres[2], -1.0, 0.0, -1.0);
+  vec3_set(spheres[2].center, -1.0, 0.0, -1.0);
   spheres[2].radius = 0.5;
   spheres[2].mat.type = GLASS;
   spheres[2].mat.id = 0;
 
-  sph_set_center(&spheres[3], -1.0, 0.0, -1.0);
-  spheres[3].radius = 0.4;
+  vec3_set(spheres[3].center, -1.0, 0.0, -1.0);
+  spheres[3].radius = 0.45;
   spheres[3].mat.type = GLASS;
   spheres[3].mat.id = 1;
 
-  sph_set_center(&spheres[4], 1.0, 0.0, -1.0);
+  vec3_set(spheres[4].center, 1.0, 0.0, -1.0);
   spheres[4].radius = 0.5;
   spheres[4].mat.type = METAL;
   spheres[4].mat.id = 0;
@@ -286,6 +307,11 @@ int main(void) {
                   glass);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
+  glfwGetCursorPos(window, &last_mouse[0], &last_mouse[1]);
+
+  glfwSetCursorPosCallback(window, on_mouse_move);
+  glfwSetScrollCallback(window, on_scroll);
+
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
 
@@ -295,6 +321,8 @@ int main(void) {
     float t = glfwGetTime();
     glUniform1f(time_loc, t);
     glUniform1ui(utime_loc, (GLuint)t);
+
+    glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
 
     for (GLsizei i = 0; i < max_tex; i++) {
       noise[i] = randf();

@@ -3,8 +3,8 @@ precision highp float;
 
 const float PI = 3.1415926535897932385;
 
-const float pos_inf = 1e38;
-const float neg_inf = -1e38;
+const float pos_inf = 1.0/0.0;
+const float neg_inf = -1.0/0.0;
 
 uniform vec2 res;
 uniform vec3 eye;
@@ -90,7 +90,7 @@ layout (location = 0) out vec4 outColor;
 int rand_index;
 float rand() {
   vec4 r = texture(noise, float(rand_index) / float(noise_size) + 0.5);
-  rand_index++; // = int(floor(r.x*float(noise_size))) % noise_size;
+  rand_index++;
   return r.x;
 }
 
