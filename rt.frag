@@ -42,6 +42,7 @@ uniform uint frame;
 #define BVH 1
 
 #define SOLID 0
+#define CHECKER 1
 
 vec2 scr;
 float aspect;
@@ -90,6 +91,12 @@ struct SolidColor {
   vec3 albedo;
 };
 
+struct Checker {
+  float inv_scale;
+  TypeId even;
+  TypeId odd;
+};
+
 struct Sphere {
   vec3 center;
   vec3 vec;
@@ -126,6 +133,7 @@ layout (std140) uniform MatBlock {
 
 layout (std140) uniform TexBlock {
   SolidColor solid_colors[MAX_TEX];
+  Checker checkers[MAX_TEX];
 };
 
 layout (std140) uniform BvhBlock {
@@ -220,9 +228,38 @@ void set_face_normal(Ray ray, vec3 n, inout Hit hit) {
   hit.n = hit.front ? n : -n;
 }
 
+vec3 solid_sample(SolidColor tex, vec2 uv, vec3 pt) {
+  return tex.albedo;
+}
+
+vec3 chk_subtex_sample(TypeId tex, vec2 uv, vec3 pt) {
+  if (tex.type == SOLID) {
+    return solid_sample(solid_colors[tex.id], uv, pt);
+  } else if (tex.type == CHECKER) {
+    // can't recurse CHECKER
+    return vec3(1.0, 0.0, 0.0);
+  } else {
+    return vec3(1.0, 0.0, 1.0);
+  }
+}
+
+vec3 checker_sample(Checker tex, vec2 uv, vec3 pt) {
+  int x = int(floor(tex.inv_scale * pt.x));
+  int y = int(floor(tex.inv_scale * pt.y));
+  int z = int(floor(tex.inv_scale * pt.z));
+
+  if ((x + y + z) % 2 == 0) {
+    return chk_subtex_sample(tex.even, uv, pt);
+  } else {
+    return chk_subtex_sample(tex.odd, uv, pt);
+  }
+}
+
 vec3 tex_sample(TypeId tex, vec2 uv, vec3 pt) {
   if (tex.type == SOLID) {
-    return solid_colors[tex.id].albedo;
+    return solid_sample(solid_colors[tex.id], uv, pt);
+  } else if (tex.type == CHECKER) {
+    return checker_sample(checkers[tex.id], uv, pt);
   } else {
     return vec3(1.0, 0.0, 1.0);
   }

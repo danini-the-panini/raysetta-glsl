@@ -23,6 +23,7 @@
 #define BVH 1
 
 #define SOLID 0
+#define CHECKER 1
 
 #define MAX_SPH 500
 #define MAX_OBJS MAX_SPH
@@ -77,6 +78,13 @@ typedef struct solid_color {
   vec3 albedo;
   float __0;
 } SolidColor;
+
+typedef struct checker {
+  float inv_scale;
+  float __0[3];
+  TypeId even;
+  TypeId odd;
+} Checker;
 
 static inline void vec3_set(vec3 v, float x, float y, float z) {
   v[0] = x;
@@ -183,6 +191,7 @@ static int lambert_count = 0;
 static int metal_count = 0;
 static int glass_count = 0;
 static int solid_color_count = 0;
+static int checker_count = 0;
 static Sphere spheres[MAX_SPH];
 static const int MAX_BVH = MAX_OBJS*2+1;
 static BVHNode bvh_nodes[MAX_OBJS*2+1];
@@ -191,6 +200,7 @@ static Lambert lamberts[MAX_MATS];
 static Metal metals[MAX_MATS];
 static Glass glass[MAX_MATS];
 static SolidColor solid_colors[MAX_TEX];
+static Checker checkers[MAX_TEX];
 
 static inline void aabb_copy(aabb r, aabb b) {
   vec3_copy(r[0], b[0]);
@@ -349,6 +359,23 @@ static inline int make_solid_color(vec3 albedo) {
   }
   vec3_copy(solid_colors[solid_color_count].albedo, albedo);
   return solid_color_count++;
+}
+
+static inline int make_checker(float scale, int even_type, int even_id, int odd_type, int odd_id) {
+  if (checker_count > MAX_TEX) {
+    fprintf(stderr, "maximum number of checker textures reached (%i)", MAX_TEX);
+    return -1;
+  }
+  checkers[checker_count].inv_scale = 1.0 / scale;
+  checkers[checker_count].even.type = even_type;
+  checkers[checker_count].even.id = even_id;
+  checkers[checker_count].odd.type = odd_type;
+  checkers[checker_count].odd.id = odd_id;
+  return checker_count++;
+}
+
+static inline int make_solid_checker(float scale, vec3 even, vec3 odd) {
+  return make_checker(scale, SOLID, make_solid_color(even), SOLID, make_solid_color(odd));
 }
 
 static inline int make_lambert(int tex_type, int tex_id) {
@@ -517,7 +544,7 @@ int main(void) {
   int gmat = make_glass(1.5);
 
   // ground
-  int ground_mat = make_lambert_solid((vec3){0.5, 0.5, 0.5});
+  int ground_mat = make_lambert(CHECKER, make_solid_checker(0.32, (vec3){0.2, 0.3, 0.1}, (vec3){0.9, 0.9, 0.9}));
   make_sphere((vec3){0.0, -1000.0, 0.0}, 1000.0, LAMBERT, ground_mat);
 
   make_sphere((vec3){0.0, 1.0, 0.0}, 1.0, GLASS, gmat);
@@ -591,9 +618,10 @@ int main(void) {
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(BVHNode)*bvh_count, bvh_nodes);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
-  GLuint tex_buf = make_unibuffer(program, sizeof(SolidColor)*MAX_TEX, "TexBlock");
+  GLuint tex_buf = make_unibuffer(program, sizeof(SolidColor)*MAX_TEX+sizeof(Checker)*MAX_TEX, "TexBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, tex_buf);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(SolidColor)*solid_color_count, solid_colors);
+  glBufferSubData(GL_UNIFORM_BUFFER, sizeof(SolidColor)*MAX_TEX, sizeof(Checker)*checker_count, checkers);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
   glfwGetCursorPos(window, &last_mouse[0], &last_mouse[1]);
