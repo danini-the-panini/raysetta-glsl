@@ -22,9 +22,12 @@
 #define SPHERE 0
 #define BVH 1
 
+#define SOLID 0
+
 #define MAX_SPH 500
 #define MAX_OBJS MAX_SPH
 #define MAX_MATS MAX_OBJS
+#define MAX_TEX MAX_MATS
 
 typedef vec4 aabb[2];
 
@@ -36,18 +39,18 @@ typedef struct bvh_node {
   aabb bbox;
 } BVHNode;
 
-typedef struct material {
+typedef struct type_id {
   int id;
   int type;
   float __1[2];
-} Material;
+} TypeId;
 
 typedef struct sphere {
   vec3 center;
   float __0;
   vec3 vec;
   float radius;
-  Material mat;
+  TypeId mat;
 } Sphere;
 
 typedef struct object {
@@ -56,19 +59,24 @@ typedef struct object {
 } Object;
 
 typedef struct lambert {
-  vec3 albedo;
-  float __0;
+  TypeId tex;
 } Lambert;
 
 typedef struct metal {
-  vec3 albedo;
   float fuzz;
+  float __0[3];
+  TypeId tex;
 } Metal;
 
 typedef struct glass {
   float index;
   float __0[3];
 } Glass;
+
+typedef struct solid_color {
+  vec3 albedo;
+  float __0;
+} SolidColor;
 
 static inline void vec3_set(vec3 v, float x, float y, float z) {
   v[0] = x;
@@ -146,6 +154,21 @@ static inline void vec3_rand(vec3 r) {
   r[2] = randf();
 }
 
+static int unibuf_count = 0;
+static inline GLuint make_unibuffer(GLuint program, GLsizei size, const char *name) {
+  GLuint loc = glGetUniformBlockIndex(program, name);
+  glUniformBlockBinding(program, loc, unibuf_count);
+  GLuint buf;
+  glGenBuffers(1, &buf);
+  glBindBuffer(GL_UNIFORM_BUFFER, buf);
+  glBufferData(GL_UNIFORM_BUFFER, size, NULL, GL_STATIC_DRAW);
+  glBindBufferBase(GL_UNIFORM_BUFFER, unibuf_count, buf);
+  glBindBufferRange(GL_UNIFORM_BUFFER, unibuf_count, buf, 0, size);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+  unibuf_count++;
+  return buf;
+}
+
 static bool clear = true;
 static Camera cam;
 static double last_mouse[2];
@@ -159,6 +182,7 @@ static int obj_count = 0;
 static int lambert_count = 0;
 static int metal_count = 0;
 static int glass_count = 0;
+static int solid_color_count = 0;
 static Sphere spheres[MAX_SPH];
 static const int MAX_BVH = MAX_OBJS*2+1;
 static BVHNode bvh_nodes[MAX_OBJS*2+1];
@@ -166,6 +190,7 @@ static Object objects[MAX_OBJS];
 static Lambert lamberts[MAX_MATS];
 static Metal metals[MAX_MATS];
 static Glass glass[MAX_MATS];
+static SolidColor solid_colors[MAX_TEX];
 
 static inline void aabb_copy(aabb r, aabb b) {
   vec3_copy(r[0], b[0]);
@@ -317,23 +342,42 @@ static inline int make_sphere(vec3 center, float radius, int mat_type, int mat_i
   return make_moving_sphere(center, center, radius, mat_type, mat_id);
 }
 
-static inline int make_lambert(vec3 albedo) {
+static inline int make_solid_color(vec3 albedo) {
+  if (solid_color_count > MAX_TEX) {
+    fprintf(stderr, "maximum number of solid colors reached (%i)", MAX_TEX);
+    return -1;
+  }
+  vec3_copy(solid_colors[solid_color_count].albedo, albedo);
+  return solid_color_count++;
+}
+
+static inline int make_lambert(int tex_type, int tex_id) {
   if (lambert_count >= MAX_MATS) {
     fprintf(stderr, "maximum number of lamberts reached (%i)", MAX_MATS);
     return -1;
   }
-  vec3_copy(lamberts[lambert_count].albedo, albedo);
+  lamberts[lambert_count].tex.id = tex_id;
+  lamberts[lambert_count].tex.type = tex_type;
   return lambert_count++;
 }
 
-static inline int make_metal(vec3 albedo, float fuzz) {
+static inline int make_lambert_solid(vec3 albedo) {
+  return make_lambert(SOLID, make_solid_color(albedo));
+}
+
+static inline int make_metal(int tex_type, int tex_id, float fuzz) {
   if (metal_count >= MAX_MATS) {
     fprintf(stderr, "maximum number of metals reached (%i)", MAX_MATS);
     return -1;
   }
-  vec3_copy(metals[metal_count].albedo, albedo);
+  metals[metal_count].tex.id = tex_id;
+  metals[metal_count].tex.type = tex_type;
   metals[metal_count].fuzz = fuzz;
   return metal_count++;
+}
+
+static inline int make_metal_solid(vec3 albedo, float fuzz) {
+  return make_metal(SOLID, make_solid_color(albedo), fuzz);
 }
 
 static inline int make_glass(float index) {
@@ -473,12 +517,12 @@ int main(void) {
   int gmat = make_glass(1.5);
 
   // ground
-  int ground_mat = make_lambert((vec3){0.5, 0.5, 0.5});
+  int ground_mat = make_lambert_solid((vec3){0.5, 0.5, 0.5});
   make_sphere((vec3){0.0, -1000.0, 0.0}, 1000.0, LAMBERT, ground_mat);
 
   make_sphere((vec3){0.0, 1.0, 0.0}, 1.0, GLASS, gmat);
-  make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert((vec3){0.4, 0.2, 0.1}));
-  make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal((vec3){0.7, 0.6, 0.5}, 0.0));
+  make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert_solid((vec3){0.4, 0.2, 0.1}));
+  make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal_solid((vec3){0.7, 0.6, 0.5}, 0.0));
 
   for (int a = -11; a < 11; a++) {
     for (int b = -11; b < 11; b++) {
@@ -496,14 +540,14 @@ int main(void) {
           vec3_rand(c);
           vec3_mul(c, c, r);
           vec3_add(center2, center, (vec3){0.0, randf()*0.5, 0.0});
-          make_moving_sphere(center, center2, 0.2, LAMBERT, make_lambert(c));
+          make_moving_sphere(center, center2, 0.2, LAMBERT, make_lambert_solid(c));
         } else if (choose_mat < 0.95) {
           // metal
           vec3 r, c;
           vec3_rand(r);
           vec3_rand(c);
           vec3_mul(c, c, r);
-          make_sphere(center, 0.2, METAL, make_metal(c, randf()*0.5));
+          make_sphere(center, 0.2, METAL, make_metal_solid(c, randf()*0.5));
         } else {
           // glass
           make_sphere(center, 0.2, GLASS, gmat);
@@ -520,28 +564,17 @@ int main(void) {
   GLuint bvh_count_loc = glGetUniformLocation(program, "bvh_count");
   glUniform1i(bvh_count_loc, bvh_count);
 
-  GLuint sph_loc = glGetUniformBlockIndex(program, "ObjBlock");
-  glUniformBlockBinding(program, sph_loc, 0);
-  GLuint sph_buf;
-  glGenBuffers(1, &sph_buf);
-  glBindBuffer(GL_UNIFORM_BUFFER, sph_buf);
-  glBufferData(GL_UNIFORM_BUFFER, sizeof(Sphere)*MAX_SPH, NULL, GL_STATIC_DRAW);
-  glBindBufferBase(GL_UNIFORM_BUFFER, 0, sph_buf);
-  glBindBufferRange(GL_UNIFORM_BUFFER, 0, sph_buf, 0, sizeof(Sphere)*MAX_SPH);
+  GLuint obj_buf = make_unibuffer(program, sizeof(Sphere)*MAX_SPH, "ObjBlock");
+  glBindBuffer(GL_UNIFORM_BUFFER, obj_buf);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
-  GLuint mat_loc = glGetUniformBlockIndex(program, "MatBlock");
-  glUniformBlockBinding(program, mat_loc, 1);
-  GLuint mat_buf;
-  glGenBuffers(1, &mat_buf);
+  GLuint mat_buf = make_unibuffer(program,
+                    sizeof(Lambert)*MAX_MATS+
+                      sizeof(Metal)*MAX_MATS+
+                      sizeof(Glass)*MAX_MATS,
+                    "MatBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, mat_buf);
-  glBufferData(GL_UNIFORM_BUFFER,
-               sizeof(Lambert)*MAX_MATS+sizeof(Metal)*MAX_MATS+sizeof(Glass)*MAX_MATS,
-               NULL, GL_STATIC_DRAW);
-  glBindBufferBase(GL_UNIFORM_BUFFER, 1, mat_buf);
-  glBindBufferRange(GL_UNIFORM_BUFFER, 1, mat_buf, 0,
-                    sizeof(Lambert)*MAX_MATS + sizeof(Metal)*MAX_MATS + sizeof(Glass)*MAX_MATS);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Lambert)*lambert_count, lamberts);
   glBufferSubData(GL_UNIFORM_BUFFER,
                   sizeof(Lambert)*MAX_MATS,
@@ -553,15 +586,14 @@ int main(void) {
                   glass);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
-  GLuint bvh_loc = glGetUniformBlockIndex(program, "BvhBlock");
-  glUniformBlockBinding(program, bvh_loc, 2);
-  GLuint bvh_buf;
-  glGenBuffers(1, &bvh_buf);
+  GLuint bvh_buf = make_unibuffer(program, sizeof(BVHNode)*MAX_BVH, "BvhBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, bvh_buf);
-  glBufferData(GL_UNIFORM_BUFFER, sizeof(BVHNode)*MAX_BVH, NULL, GL_STATIC_DRAW);
-  glBindBufferBase(GL_UNIFORM_BUFFER, 2, bvh_buf);
-  glBindBufferRange(GL_UNIFORM_BUFFER, 2, bvh_buf, 0, sizeof(BVHNode)*MAX_BVH);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(BVHNode)*bvh_count, bvh_nodes);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  GLuint tex_buf = make_unibuffer(program, sizeof(SolidColor)*MAX_TEX, "TexBlock");
+  glBindBuffer(GL_UNIFORM_BUFFER, tex_buf);
+  glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(SolidColor)*solid_color_count, solid_colors);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
   glfwGetCursorPos(window, &last_mouse[0], &last_mouse[1]);

@@ -2,11 +2,17 @@
 precision highp float;
 
 #define MAX_SPH 500
-#define MAX_OBJ MAX_SPH
-#define MAX_MATS MAX_OBJ
-const int MAX_BVH = MAX_OBJ*2+1;
+#define MAX_OBJS MAX_SPH
+#define MAX_MATS MAX_OBJS
+#define MAX_TEX MAX_MATS
+const int MAX_BVH = MAX_OBJS*2+1;
 
 const float PI = 3.1415926535897932385;
+
+float atan2(in float y, in float x) {
+  bool s = (abs(x) > abs(y));
+  return mix(PI/2.0 - atan(x,y), atan(y,x), s);
+}
 
 const float pos_inf = 1.0/0.0;
 const float neg_inf = -1.0/0.0;
@@ -28,14 +34,14 @@ uniform float time;
 uniform uint utime;
 uniform uint frame;
 
-// uniform sampler2D prev;
-
 #define LAMBERT 0
 #define METAL 1
 #define GLASS 2
 
 #define SPHERE 0
 #define BVH 1
+
+#define SOLID 0
 
 vec2 scr;
 float aspect;
@@ -57,34 +63,38 @@ vec3 cw;
 vec3 df_u;
 vec3 df_v;
 
+struct TypeId {
+  int id;
+  int type;
+};
+
 struct AABB {
   vec3 min;
   vec3 max;
 };
 
 struct Lambert {
-  vec3 albedo;
+  TypeId tex;
 };
 
 struct Metal {
-  vec3 albedo;
   float fuzz;
+  TypeId tex;
 };
 
 struct Glass {
   float index;
 };
 
-struct Material {
-  int id;
-  int type;
+struct SolidColor {
+  vec3 albedo;
 };
 
 struct Sphere {
   vec3 center;
   vec3 vec;
   float radius;
-  Material mat;
+  TypeId mat;
 };
 
 struct Hit {
@@ -92,7 +102,8 @@ struct Hit {
   bool front;
   vec3 p;
   vec3 n;
-  Material mat;
+  vec2 uv;
+  TypeId mat;
 };
 
 struct BVHNode {
@@ -111,6 +122,10 @@ layout (std140) uniform MatBlock {
   Lambert lamberts[MAX_MATS];
   Metal metals[MAX_MATS];
   Glass glass[MAX_MATS];
+};
+
+layout (std140) uniform TexBlock {
+  SolidColor solid_colors[MAX_TEX];
 };
 
 layout (std140) uniform BvhBlock {
@@ -205,12 +220,20 @@ void set_face_normal(Ray ray, vec3 n, inout Hit hit) {
   hit.n = hit.front ? n : -n;
 }
 
+vec3 tex_sample(TypeId tex, vec2 uv, vec3 pt) {
+  if (tex.type == SOLID) {
+    return solid_colors[tex.id].albedo;
+  } else {
+    return vec3(1.0, 0.0, 1.0);
+  }
+}
+
 bool scat_lambert(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   Lambert mat = lamberts[hit.mat.id];
   vec3 scat_dir = hit.n + rand_unit();
   if (nearz(scat_dir)) scat_dir = hit.n;
   scat = Ray(hit.p, scat_dir, r_in.tm);
-  att = mat.albedo;
+  att = tex_sample(mat.tex, hit.uv, hit.p);
   return true;
 }
 
@@ -218,7 +241,7 @@ bool scat_metal(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   Metal mat = metals[hit.mat.id];
   vec3 r = normalize(reflect(r_in.dir, hit.n)) + (mat.fuzz * rand_unit());
   scat = Ray(hit.p, r, r_in.tm);
-  att = mat.albedo;
+  att = tex_sample(mat.tex, hit.uv, hit.p);
   return (dot(r, hit.n) > 0.0);
 }
 
@@ -288,6 +311,13 @@ bool hit_aabb(AABB self, Ray r, Range ray_t) {
   return true;
 }
 
+vec2 sphere_uv(vec3 p) {
+  float theta = acos(-p.y);
+  float phi = atan2(-p.z, p.x) + PI;
+
+  return vec2(phi / (2.0*PI), theta / PI);
+}
+
 bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
   vec3 center = self.center + self.vec * ray.tm;
   vec3 oc = center - ray.orig;
@@ -314,6 +344,7 @@ bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
   hit.p = point;
   vec3 n = (point - center) / self.radius;
   set_face_normal(ray, n, hit);
+  hit.uv = sphere_uv(n);
   hit.mat = self.mat;
 
   return true;
