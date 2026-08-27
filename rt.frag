@@ -5,13 +5,29 @@ precision highp float;
 #define MAX_OBJS MAX_SPH
 #define MAX_MATS MAX_OBJS
 #define MAX_TEX MAX_MATS
+#define MAX_IMG 8
 const int MAX_BVH = MAX_OBJS*2+1;
 
 const float PI = 3.1415926535897932385;
 
 float atan2(in float y, in float x) {
-  bool s = (abs(x) > abs(y));
-  return mix(PI/2.0 - atan(x,y), atan(y,x), s);
+  if (x > 0.0) {
+    return atan(y/x);
+  } else if (x < 0.0) {
+    if (y >= 0.0) {
+      return atan(y/x)+PI;
+    } else {
+      return atan(y/x)-PI;
+    }
+  } else {
+    if (y > 0) {
+      return PI/2.0;
+    } else if (y < 0) {
+      return -PI/2.0;
+    } else {
+      return 0.0/0.0; // NaN
+    }
+  }
 }
 
 const float pos_inf = 1.0/0.0;
@@ -30,6 +46,8 @@ uniform int depth;
 uniform int noise_size;
 uniform sampler1D noise;
 
+uniform sampler2DArray images;
+
 uniform float time;
 uniform uint utime;
 uniform uint frame;
@@ -43,6 +61,7 @@ uniform uint frame;
 
 #define SOLID 0
 #define CHECKER 1
+#define IMAGE 2
 
 vec2 scr;
 float aspect;
@@ -97,6 +116,12 @@ struct Checker {
   TypeId odd;
 };
 
+struct Image {
+  int id;
+  int width;
+  int height;
+};
+
 struct Sphere {
   vec3 center;
   vec3 vec;
@@ -134,6 +159,7 @@ layout (std140) uniform MatBlock {
 layout (std140) uniform TexBlock {
   SolidColor solid_colors[MAX_TEX];
   Checker checkers[MAX_TEX];
+  Image image_tex[MAX_IMG];
 };
 
 layout (std140) uniform BvhBlock {
@@ -147,7 +173,7 @@ layout (location = 0) out vec4 outColor;
 
 int rand_index;
 float rand() {
-  vec4 r = texture(noise, float(rand_index) / float(noise_size) + 0.5);
+  vec4 r = texelFetch(noise, rand_index, 0);
   rand_index++;
   return r.x;
 }
@@ -232,14 +258,45 @@ vec3 solid_sample(SolidColor tex, vec2 uv, vec3 pt) {
   return tex.albedo;
 }
 
-vec3 chk_subtex_sample(TypeId tex, vec2 uv, vec3 pt) {
+vec3 image_sample(Image tex, vec2 uv, vec3 pt) {
+  float u = clamp(uv.x, 0.0, 1.0)*tex.width;
+  float v = (1.0 - clamp(uv.y, 0.0, 1.0))*tex.height;
+
+  int iu = clamp(int(floor(u)), 0, tex.width-2);
+  int iv = clamp(int(floor(v)), 0, tex.height-2);
+
+  vec4 p1 = texelFetch(images, ivec3(iu, iv, tex.id), 0);
+  vec4 p2 = texelFetch(images, ivec3(iu + 1, iv, tex.id), 0);
+  vec4 p3 = texelFetch(images, ivec3(iu, iv + 1, tex.id), 0);
+  vec4 p4 = texelFetch(images, ivec3(iu + 1, iv + 1, tex.id), 0);
+
+  float fx = u - iu;
+  float fy = v - iv;
+
+  return mix(
+    mix(p1, p2, fx),
+    mix(p3, p4, fx),
+    fy
+  ).xyz;
+}
+
+vec3 nochk_tex_sample(TypeId tex, vec2 uv, vec3 pt) {
   if (tex.type == SOLID) {
     return solid_sample(solid_colors[tex.id], uv, pt);
-  } else if (tex.type == CHECKER) {
-    // can't recurse CHECKER
-    return vec3(1.0, 0.0, 0.0);
+  } else if (tex.type == IMAGE) {
+    // return vec3(0.0, 1.0, 1.0);
+    return image_sample(image_tex[tex.id], uv, pt);
   } else {
     return vec3(1.0, 0.0, 1.0);
+  }
+}
+
+vec3 chk_subtex_sample(TypeId tex, vec2 uv, vec3 pt) {
+  if (tex.type == CHECKER) {
+    // can't recurse checker
+    return vec3(1.0, 0.0, 0.0);
+  } else {
+    return nochk_tex_sample(tex, uv, pt);
   }
 }
 
@@ -256,12 +313,10 @@ vec3 checker_sample(Checker tex, vec2 uv, vec3 pt) {
 }
 
 vec3 tex_sample(TypeId tex, vec2 uv, vec3 pt) {
-  if (tex.type == SOLID) {
-    return solid_sample(solid_colors[tex.id], uv, pt);
-  } else if (tex.type == CHECKER) {
+  if (tex.type == CHECKER) {
     return checker_sample(checkers[tex.id], uv, pt);
   } else {
-    return vec3(1.0, 0.0, 1.0);
+    return nochk_tex_sample(tex, uv, pt);
   }
 }
 

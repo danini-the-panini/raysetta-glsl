@@ -9,11 +9,14 @@
 
 #include <GLFW/glfw3.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include "linmath.h"
 #include "camera.h"
 
-#define WIDTH 720
-#define HEIGHT 400
+#define WIDTH 400
+#define HEIGHT 200
 
 #define LAMBERT 0
 #define METAL 1
@@ -24,11 +27,13 @@
 
 #define SOLID 0
 #define CHECKER 1
+#define IMAGE 2
 
 #define MAX_SPH 500
 #define MAX_OBJS MAX_SPH
 #define MAX_MATS MAX_OBJS
 #define MAX_TEX MAX_MATS
+#define MAX_IMG 8
 
 typedef vec4 aabb[2];
 
@@ -86,6 +91,37 @@ typedef struct checker {
   TypeId odd;
 } Checker;
 
+typedef struct image_tex {
+  int id;
+  int width;
+  int height;
+  float __0;
+} ImageTex;
+
+static inline void glErrorCheck(const char *msg) {
+  GLenum err = glGetError();
+  if (err == GL_NO_ERROR) return;
+
+  switch (err) {
+  case GL_INVALID_ENUM: printf("%s: GL_INVALID_ENUM\n", msg); break;
+  case GL_INVALID_VALUE: printf("%s: GL_INVALID_VALUE\n", msg); break;
+  case GL_INVALID_OPERATION: printf("%s: GL_INVALID_OPERATION\n", msg); break;
+  case GL_INVALID_FRAMEBUFFER_OPERATION: printf("%s: GL_INVALID_FRAMEBUFFER_OPERATION\n", msg); break;
+  case GL_OUT_OF_MEMORY: printf("%s: GL_OUT_OF_MEMORY\n", msg); break;
+  default: printf("Unknown error %i\n", err); break;
+  }
+}
+
+static inline unsigned int next_po2(unsigned int v) {
+  v--;
+  v |= v >> 1;
+  v |= v >> 2;
+  v |= v >> 4;
+  v |= v >> 8;
+  v |= v >> 16;
+  return ++v;
+}
+
 static inline void vec3_set(vec3 v, float x, float y, float z) {
   v[0] = x;
   v[1] = y;
@@ -112,6 +148,34 @@ static bool load_shader(const char *filename, GLenum type, GLuint *ret) {
   free(str);
   *ret = shader;
   return true;
+}
+
+typedef struct image_data {
+  float *data;
+  int width;
+  int height;
+} ImageData;
+static ImageData images[MAX_IMG];
+static int image_count = 0;
+static int max_width = 1;
+static int max_height = 1;
+static int load_image(const char *filename) {
+  if (image_count >= MAX_IMG) {
+    fprintf(stderr, "maximum number of images reached (%i)\n", MAX_IMG);
+    return -1;
+  }
+  int width, height, channels;
+  float *data = stbi_loadf(filename, &width, &height, &channels, 3);
+  if (!data) {
+    fprintf(stderr, "failed to load image %s\n", filename);
+    return -1;
+  }
+  if (width > max_width) max_width = width;
+  if (height > max_height) max_height = height;
+  images[image_count].data = data;
+  images[image_count].width = width;
+  images[image_count].height = height;
+  return image_count++;
 }
 
 void print_shader_info_log(GLuint shader) {
@@ -192,6 +256,7 @@ static int metal_count = 0;
 static int glass_count = 0;
 static int solid_color_count = 0;
 static int checker_count = 0;
+static int image_tex_count = 0;
 static Sphere spheres[MAX_SPH];
 static const int MAX_BVH = MAX_OBJS*2+1;
 static BVHNode bvh_nodes[MAX_OBJS*2+1];
@@ -201,6 +266,7 @@ static Metal metals[MAX_MATS];
 static Glass glass[MAX_MATS];
 static SolidColor solid_colors[MAX_TEX];
 static Checker checkers[MAX_TEX];
+static ImageTex image_tex[MAX_IMG];
 
 static inline void aabb_copy(aabb r, aabb b) {
   vec3_copy(r[0], b[0]);
@@ -378,6 +444,25 @@ static inline int make_solid_checker(float scale, vec3 even, vec3 odd) {
   return make_checker(scale, SOLID, make_solid_color(even), SOLID, make_solid_color(odd));
 }
 
+static inline int make_image_tex(int id) {
+  if (image_tex_count > MAX_IMG) {
+    fprintf(stderr, "maximum number of image textures reached (%i)", MAX_IMG);
+    return -1;
+  }
+  if (id < 0) {
+    fprintf(stderr, "invalid image id %i\n", id);
+    return -1;
+  }
+  image_tex[image_tex_count].id = id;
+  image_tex[image_tex_count].width = images[id].width;
+  image_tex[image_tex_count].height = images[id].height;
+  return image_tex_count++;
+}
+
+static inline int make_image_tex_from_file(const char *filename) {
+  return make_image_tex(load_image(filename));
+}
+
 static inline int make_lambert(int tex_type, int tex_id) {
   if (lambert_count >= MAX_MATS) {
     fprintf(stderr, "maximum number of lamberts reached (%i)", MAX_MATS);
@@ -457,7 +542,7 @@ int main(void) {
   int version = gladLoadGL(glfwGetProcAddress);
   printf("GL %d.%d\n", GLAD_VERSION_MAJOR(version), GLAD_VERSION_MINOR(version));
 
-  GLsizei max_tex = 0;
+  GLsizei max_tex = 1024;
   glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
 
   glEnable(GL_FRAMEBUFFER_SRGB);
@@ -489,6 +574,7 @@ int main(void) {
   }
 
   glUseProgram(program);
+  glErrorCheck("shader");
 
   GLuint time_loc = glGetUniformLocation(program, "time");
   GLuint utime_loc = glGetUniformLocation(program, "utime");
@@ -502,12 +588,15 @@ int main(void) {
   glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   glTexStorage1D(GL_TEXTURE_1D, 1, GL_R32F, max_tex);
   glTexSubImage1D(GL_TEXTURE_1D, 0, 0, max_tex, GL_RED, GL_FLOAT, noise);
-  glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_1D, 0);
+  glErrorCheck("noise tex");
 
   GLuint noise_loc = glGetUniformLocation(program, "noise");
-  GLuint noise_size_loc = glGetUniformLocation(program, "noise_size");
   glUniform1i(noise_loc, 0);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_1D, noise_tex);
+
+  GLuint noise_size_loc = glGetUniformLocation(program, "noise_size");
   glUniform1i(noise_size_loc, max_tex);
 
   const int samples = 1;
@@ -540,6 +629,7 @@ int main(void) {
   glUniform1f(defocus_angle_loc, cam.defocus_angle);
   GLuint focus_dist_loc = glGetUniformLocation(program, "focus_dist");
   glUniform1f(focus_dist_loc, cam.focus_dist);
+  glErrorCheck("cam");
 
   int gmat = make_glass(1.5);
 
@@ -548,8 +638,8 @@ int main(void) {
   make_sphere((vec3){0.0, -1000.0, 0.0}, 1000.0, LAMBERT, ground_mat);
 
   make_sphere((vec3){0.0, 1.0, 0.0}, 1.0, GLASS, gmat);
-  make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert_solid((vec3){0.4, 0.2, 0.1}));
-  make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal_solid((vec3){0.7, 0.6, 0.5}, 0.0));
+  make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(IMAGE, make_image_tex_from_file("moon.png")));
+  make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal(IMAGE, make_image_tex_from_file("earth.jpg"), 0.0));
 
   for (int a = -11; a < 11; a++) {
     for (int b = -11; b < 11; b++) {
@@ -595,6 +685,7 @@ int main(void) {
   glBindBuffer(GL_UNIFORM_BUFFER, obj_buf);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
+  glErrorCheck("bind obj");
 
   GLuint mat_buf = make_unibuffer(program,
                     sizeof(Lambert)*MAX_MATS+
@@ -617,18 +708,53 @@ int main(void) {
   glBindBuffer(GL_UNIFORM_BUFFER, bvh_buf);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(BVHNode)*bvh_count, bvh_nodes);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
+  glErrorCheck("bind mat");
 
-  GLuint tex_buf = make_unibuffer(program, sizeof(SolidColor)*MAX_TEX+sizeof(Checker)*MAX_TEX, "TexBlock");
+  GLuint tex_buf = make_unibuffer(program,
+                    sizeof(SolidColor)*MAX_TEX+
+                      sizeof(Checker)*MAX_TEX+
+                      sizeof(ImageTex)*MAX_IMG,
+                    "TexBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, tex_buf);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(SolidColor)*solid_color_count, solid_colors);
-  glBufferSubData(GL_UNIFORM_BUFFER, sizeof(SolidColor)*MAX_TEX, sizeof(Checker)*checker_count, checkers);
+  glBufferSubData(GL_UNIFORM_BUFFER,
+                  sizeof(SolidColor)*MAX_TEX,
+                  sizeof(Checker)*checker_count, checkers);
+  glBufferSubData(GL_UNIFORM_BUFFER,
+                  sizeof(SolidColor)*MAX_TEX + sizeof(Checker)*MAX_TEX,
+                  sizeof(ImageTex)*image_tex_count, image_tex);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
+  glErrorCheck("bind tex");
+
+  GLuint images_tex = 0;
+  glGenTextures(1, &images_tex);
+  glBindTexture(GL_TEXTURE_2D_ARRAY, images_tex);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);	
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glErrorCheck("tex param");
+  glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGB32F, next_po2(max_width), next_po2(max_height), image_count < 1 ? 1 : image_count);
+  glErrorCheck("tex storage 3d");
+  for (int i = 0; i < image_count; i++) {
+    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, images[i].width, images[i].height, 1, GL_RGB, GL_FLOAT, images[i].data);
+    printf("i %i\n", i);
+    glErrorCheck("tex sub data 3d");
+  }
+  glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+  glErrorCheck("setup images");
+
+  GLuint images_loc = glGetUniformLocation(program, "images");
+  glUniform1i(images_loc, 1);
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_2D_ARRAY, images_tex);
 
   glfwGetCursorPos(window, &last_mouse[0], &last_mouse[1]);
 
   glfwSetFramebufferSizeCallback(window, on_resize);
   glfwSetCursorPosCallback(window, on_mouse_move);
   glfwSetScrollCallback(window, on_scroll);
+
+  glErrorCheck("before draw");
 
   int nframes = 0;
   float last_time = glfwGetTime();
