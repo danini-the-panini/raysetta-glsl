@@ -259,7 +259,15 @@ static int cmp_y(const void *a, const void *b) { return cmp_axis(a, b, 1); }
 static int cmp_z(const void *a, const void *b) { return cmp_axis(a, b, 2); }
 
 static int make_bvh_nodes(int start, int end) {
-  int axis = randi_r(0, 2);;
+  aabb bbox;
+  vec3_set(bbox[0], INFINITY, INFINITY, INFINITY);
+  vec3_set(bbox[1], -INFINITY, -INFINITY, -INFINITY);
+  for (int i = start; i < end; i++) {
+    aabb obox;
+    obj_bbox(obox, objects[i].type, objects[i].id);
+    aabb_add(bbox, bbox, obox);
+  }
+  int axis = aabb_longest(bbox);
 
   cmpfn cmp = axis == 0 ? cmp_x : (axis == 1 ? cmp_y : cmp_z);
 
@@ -590,7 +598,7 @@ int main(void) {
       glClearColor(0.7f, 0.9f, 0.1f, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT);
       int w, h;
-      glfwGetWindowSize(window,&w, &h);
+      glfwGetFramebufferSize(window, &w, &h);
       glViewport(0, 0, w, h);
       glUniform2f(res_loc, w, h);
       clear = false;
