@@ -1,7 +1,10 @@
 #version 410
 precision highp float;
 
-#define MAX_OBJ 200
+#define MAX_SPH 500
+#define MAX_OBJ MAX_SPH
+#define MAX_MATS MAX_OBJ
+const int MAX_BVH = MAX_OBJ*2+1;
 
 const float PI = 3.1415926535897932385;
 
@@ -31,6 +34,9 @@ uniform uint frame;
 #define METAL 1
 #define GLASS 2
 
+#define SPHERE 0
+#define BVH 1
+
 vec2 scr;
 float aspect;
 float flen;
@@ -50,6 +56,11 @@ vec3 cw;
 
 vec3 df_u;
 vec3 df_v;
+
+struct AABB {
+  vec3 min;
+  vec3 max;
+};
 
 struct Lambert {
   vec3 albedo;
@@ -84,17 +95,30 @@ struct Hit {
   Material mat;
 };
 
+struct BVHNode {
+  int left_id;
+  int left_type;
+  int right_id;
+  int right_type;
+  AABB bbox;
+};
+
 layout (std140) uniform ObjBlock {
-  Sphere spheres [MAX_OBJ];
+  Sphere spheres[MAX_SPH];
 };
 
 layout (std140) uniform MatBlock {
-  Lambert lamberts [MAX_OBJ];
-  Metal metals [MAX_OBJ];
-  Glass glass [MAX_OBJ];
+  Lambert lamberts[MAX_MATS];
+  Metal metals[MAX_MATS];
+  Glass glass[MAX_MATS];
+};
+
+layout (std140) uniform BvhBlock {
+  BVHNode bvh[MAX_BVH];
 };
 
 uniform int sphere_count;
+uniform int bvh_count;
 in vec2 uv;
 layout (location = 0) out vec4 outColor;
 
@@ -107,11 +131,6 @@ float rand() {
 
 float rand(float min, float max) {
   return min + (max-min)*rand();
-}
-
-vec3 jitter(vec3 d, float phi, float sina, float cosa) {
-  vec3 w = normalize(d), u = normalize(cross(w.yzx, w)), v = cross(w, u);
-  return (u*cos(phi) + v*sin(phi)) * sina + w * cosa;
 }
 
 vec3 rand3() {
@@ -243,6 +262,32 @@ bool scat(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   }
 }
 
+bool hit_aabb(AABB self, Ray r, Range ray_t) {
+  vec3 orig = r.orig;
+  vec3 dir = r.dir;
+
+  for (int axis = 0; axis < 3; axis++) {
+    Range ax = Range(self.min[axis], self.max[axis]);
+    float adinv = 1.0 / dir[axis];
+
+    float t0 = (ax.min - orig[axis]) * adinv;
+    float t1 = (ax.max - orig[axis]) * adinv;
+
+    if (t0 < t1) {
+      if (t0 > ray_t.min) ray_t.min = t0;
+      if (t1 < ray_t.max) ray_t.max = t1;
+    } else {
+      if (t1 > ray_t.min) ray_t.min = t1;
+      if (t0 < ray_t.max) ray_t.max = t0;
+    }
+
+    if (ray_t.max <= ray_t.min) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
   vec3 center = self.center + self.vec * ray.tm;
   vec3 oc = center - ray.orig;
@@ -274,20 +319,45 @@ bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
   return true;
 }
 
-bool hit_world(Ray ray, Range ray_t, out Hit hit) {
-  Hit tmp;
-  bool did_hit = false;
-  float closest = ray_t.max;
-
-  for (int i = 0; i < sphere_count; i++) {
-    if (hit_sphere(spheres[i], ray, Range(ray_t.min, closest), tmp)) {
-      did_hit = true;
-      closest = tmp.t;
-      hit = tmp;
-    }
+bool hit_obj(int type, int id, Ray r, Range rt, out Hit hit) {
+  if (type == SPHERE) {
+    return hit_sphere(spheres[id], r, rt, hit);
+  } else {
+    return false;
   }
+}
 
+bool hit_bvh(BVHNode self, Ray ray, Range ray_t, out Hit hit) {
+  int stack[MAX_BVH];
+  int si = 0;
+  bool did_hit = false;
+  stack[si++] = bvh_count-1;
+  float closest = ray_t.max;
+  while (si > 0) {
+    int id = stack[si-1];
+    si--;
+    if (hit_aabb(bvh[id].bbox, ray, Range(ray_t.min, closest))) {
+      if (bvh[id].left_type == BVH) {
+        stack[si++] = bvh[id].right_id;
+        stack[si++] = bvh[id].left_id;
+      } else {
+        bool hit_left = hit_obj(bvh[id].left_type, bvh[id].left_id, ray, Range(ray_t.min, closest), hit);
+        bool hit_right = hit_left;
+        if (hit_left) closest = hit.t;
+        if (bvh[id].right_type != bvh[id].left_type || bvh[id].right_id != bvh[id].left_id) {
+          hit_right = hit_obj(bvh[id].right_type, bvh[id].right_id, ray, Range(ray_t.min, closest), hit);
+          if (hit_right) closest = hit.t;
+        }
+
+        did_hit = did_hit || hit_left || hit_right;
+      }
+    };
+  }
   return did_hit;
+}
+
+bool hit_world(Ray ray, Range ray_t, out Hit hit) {
+  return (hit_bvh(bvh[bvh_count-1], ray, ray_t, hit));
 }
 
 vec3 defocus_disk_sample() {
@@ -335,7 +405,7 @@ vec3 ray_color(Ray ray) {
 }
 
 void main() {
-  rand_index = int(time + floor(gl_FragCoord.x) + floor(res.x * gl_FragCoord.y) + noise_size * time) % noise_size;
+  rand_index = int(time + floor(gl_FragCoord.x) + floor(res.x * gl_FragCoord.y)) % noise_size;
 
   scr = uv * res;
 

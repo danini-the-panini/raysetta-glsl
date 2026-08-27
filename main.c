@@ -19,11 +19,27 @@
 #define METAL 1
 #define GLASS 2
 
-#define MAX_OBJS 200
+#define SPHERE 0
+#define BVH 1
+
+#define MAX_SPH 500
+#define MAX_OBJS MAX_SPH
+#define MAX_MATS MAX_OBJS
+
+typedef vec4 aabb[2];
+
+typedef struct bvh_node {
+  int left_id;
+  int left_type;
+  int right_id;
+  int right_type;
+  aabb bbox;
+} BVHNode;
 
 typedef struct material {
   int id;
   int type;
+  float __1[2];
 } Material;
 
 typedef struct sphere {
@@ -32,9 +48,12 @@ typedef struct sphere {
   vec3 vec;
   float radius;
   Material mat;
-  float __1;
-  float __2;
 } Sphere;
+
+typedef struct object {
+  int id;
+  int type;
+} Object;
 
 typedef struct lambert {
   vec3 albedo;
@@ -48,9 +67,7 @@ typedef struct metal {
 
 typedef struct glass {
   float index;
-  float __0;
-  float __1;
-  float __2;
+  float __0[3];
 } Glass;
 
 static inline void vec3_set(vec3 v, float x, float y, float z) {
@@ -119,6 +136,10 @@ static inline float randf_r(float min, float max) {
   return min + (max-min)*randf();
 }
 
+static inline int randi_r(int min, int max) {
+  return (int)(randf_r(min, max+1));
+}
+
 static inline void vec3_rand(vec3 r) {
   r[0] = randf();
   r[1] = randf();
@@ -132,22 +153,145 @@ static float orbit_max = 100.0;
 static float orbit_min = 0.1;
 static GLuint frame = 0;
 
+static int bvh_count = 0;
 static int sphere_count = 0;
+static int obj_count = 0;
 static int lambert_count = 0;
 static int metal_count = 0;
 static int glass_count = 0;
-static Sphere spheres[MAX_OBJS];
-static Lambert lamberts[MAX_OBJS];
-static Metal metals[MAX_OBJS];
-static Glass glass[MAX_OBJS];
+static Sphere spheres[MAX_SPH];
+static const int MAX_BVH = MAX_OBJS*2+1;
+static BVHNode bvh_nodes[MAX_OBJS*2+1];
+static Object objects[MAX_OBJS];
+static Lambert lamberts[MAX_MATS];
+static Metal metals[MAX_MATS];
+static Glass glass[MAX_MATS];
+
+static inline void aabb_copy(aabb r, aabb b) {
+  vec3_copy(r[0], b[0]);
+  vec3_copy(r[1], b[1]);
+}
+
+static inline void aabb_add(aabb r, aabb a, aabb b) {
+  r[0][0] = fminf(a[0][0], b[0][0]);
+  r[0][1] = fminf(a[0][1], b[0][1]);
+  r[0][2] = fminf(a[0][2], b[0][2]);
+
+  r[1][0] = fmaxf(a[1][0], b[1][0]);
+  r[1][1] = fmaxf(a[1][1], b[1][1]);
+  r[1][2] = fmaxf(a[1][2], b[1][2]);
+}
+
+static inline void aabb_make(aabb r, vec3 a, vec3 b) {
+  r[0][0] = fminf(a[0], b[0]);
+  r[0][1] = fminf(a[1], b[1]);
+  r[0][2] = fminf(a[2], b[2]);
+
+  r[1][0] = fmaxf(a[0], b[0]);
+  r[1][1] = fmaxf(a[1], b[1]);
+  r[1][2] = fmaxf(a[2], b[2]);
+}
+
+static inline int aabb_longest(aabb a) {
+  float xsize = a[1][0] - a[0][0];
+  float ysize = a[1][1] - a[0][1];
+  float zsize = a[1][2] - a[0][2];
+
+  if (xsize > ysize) {
+    return xsize > zsize ? 0 : 2;
+  } else {
+    return ysize > zsize ? 1 : 2;
+  }
+}
+
+static inline void sphere_bbox(aabb r, const Sphere *sph) {
+  vec3 rvec = (vec3){sph->radius, sph->radius, sph->radius};
+  aabb box0, box1;  vec3 a, b, center2;
+  vec3_sub(a, sph->center, rvec);
+  vec3_add(b, sph->center, rvec);
+  aabb_make(box0, a, b);
+  vec3_add(center2, sph->center, sph->vec);
+  vec3_sub(a, center2, rvec);
+  vec3_add(b, center2, rvec);
+  aabb_make(box1, a, b);
+  aabb_add(r, box0, box1);
+}
+
+static inline void obj_bbox(aabb r, int type, int id) {
+  switch (type) {
+  case SPHERE: sphere_bbox(r, spheres+id); break;
+  case BVH: aabb_copy(r, bvh_nodes[id].bbox); break;
+  }
+}
+
+static inline int make_bvh_node(int left_type, int left_id, int right_type, int right_id) {
+  if (left_id < 0 || right_id < 0) {
+    fprintf(stderr, "invalid obj id (%i)\n'", left_id < 0 ? left_id : right_id);
+    return -1;
+  }
+  if (bvh_count >= MAX_BVH) {
+    fprintf(stderr, "maximum number of bvh nodes reached (%i)\n", MAX_BVH);
+    return -1;
+  }
+
+  bvh_nodes[bvh_count].left_type = left_type;
+  bvh_nodes[bvh_count].left_id = left_id;
+  bvh_nodes[bvh_count].right_type = right_type;
+  bvh_nodes[bvh_count].right_id = right_id;
+  aabb lbox, rbox;
+  obj_bbox(lbox, left_type, left_id);
+  obj_bbox(rbox, right_type, right_id);
+  aabb_add(bvh_nodes[bvh_count].bbox, lbox, rbox);
+  return bvh_count++;
+}
+
+typedef int (*cmpfn)(const void*, const void*);
+
+static int cmp_axis(const Object *a, const Object *b, int axis) {
+  aabb box0, box1;
+  obj_bbox(box0, a->type, a->id);
+  obj_bbox(box1, b->type, b->id);
+  return box0[0][axis] < box1[0][axis] ? -1 : 1;
+}
+
+static int cmp_x(const void *a, const void *b) { return cmp_axis(a, b, 0); }
+static int cmp_y(const void *a, const void *b) { return cmp_axis(a, b, 1); }
+static int cmp_z(const void *a, const void *b) { return cmp_axis(a, b, 2); }
+
+static int make_bvh_nodes(int start, int end) {
+  int axis = randi_r(0, 2);;
+
+  cmpfn cmp = axis == 0 ? cmp_x : (axis == 1 ? cmp_y : cmp_z);
+
+  int span = end - start;
+
+  if (span == 1) {
+    return make_bvh_node(objects[start].type, objects[start].id, objects[start].type, objects[start].id);
+  } else if (span == 2) {
+    return make_bvh_node(objects[start].type, objects[start].id, objects[start+1].type, objects[start+1].id);
+  } else {
+    qsort(objects+start, span, sizeof(Object), cmp);
+    int mid = start + span / 2;
+    int l = make_bvh_nodes(start, mid);
+    int r = make_bvh_nodes(mid, end);
+    if (l < 0 || r < 0) {
+      return -1;
+    }
+    return make_bvh_node(BVH, l, BVH, r);
+  }
+}
 
 static inline int make_moving_sphere(vec3 center1, vec3 center2, float radius, int mat_type, int mat_id) {
   if (mat_id < 0) {
     fprintf(stderr, "invalid material id (%i)\n'", mat_id);
     return -1;
   }
-  if (sphere_count >= MAX_OBJS) {
-    fprintf(stderr, "maximum number of spheres reached (%i)\n", MAX_OBJS);
+  if (sphere_count >= MAX_SPH) {
+    fprintf(stderr, "maximum number of spheres reached (%i)\n", MAX_SPH);
+    return -1;
+  }
+  if (obj_count >= MAX_OBJS) {
+    fprintf(stderr, "maximum number of objectss reached (%i)\n", MAX_OBJS);
     return -1;
   }
   vec3_copy(spheres[sphere_count].center, center1);
@@ -155,6 +299,9 @@ static inline int make_moving_sphere(vec3 center1, vec3 center2, float radius, i
   spheres[sphere_count].radius = radius;
   spheres[sphere_count].mat.type = mat_type;
   spheres[sphere_count].mat.id = mat_id;
+  objects[obj_count].type = SPHERE;
+  objects[obj_count].id = sphere_count;
+  obj_count++;
   return sphere_count++;
 }
 
@@ -163,8 +310,8 @@ static inline int make_sphere(vec3 center, float radius, int mat_type, int mat_i
 }
 
 static inline int make_lambert(vec3 albedo) {
-  if (lambert_count >= MAX_OBJS) {
-    fprintf(stderr, "maximum number of lamberts reached (%i)", MAX_OBJS);
+  if (lambert_count >= MAX_MATS) {
+    fprintf(stderr, "maximum number of lamberts reached (%i)", MAX_MATS);
     return -1;
   }
   vec3_copy(lamberts[lambert_count].albedo, albedo);
@@ -172,8 +319,8 @@ static inline int make_lambert(vec3 albedo) {
 }
 
 static inline int make_metal(vec3 albedo, float fuzz) {
-  if (metal_count >= MAX_OBJS) {
-    fprintf(stderr, "maximum number of metals reached (%i)", MAX_OBJS);
+  if (metal_count >= MAX_MATS) {
+    fprintf(stderr, "maximum number of metals reached (%i)", MAX_MATS);
     return -1;
   }
   vec3_copy(metals[metal_count].albedo, albedo);
@@ -182,8 +329,8 @@ static inline int make_metal(vec3 albedo, float fuzz) {
 }
 
 static inline int make_glass(float index) {
-  if (glass_count >= MAX_OBJS) {
-    fprintf(stderr, "maximum number of glasss reached (%i)", MAX_OBJS);
+  if (glass_count >= MAX_MATS) {
+    fprintf(stderr, "maximum number of glasss reached (%i)", MAX_MATS);
     return -1;
   }
   glass[glass_count].index = index;
@@ -325,8 +472,8 @@ int main(void) {
   make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert((vec3){0.4, 0.2, 0.1}));
   make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal((vec3){0.7, 0.6, 0.5}, 0.0));
 
-  for (int a = -5; a < 5; a++) {
-    for (int b = -5; b < 5; b++) {
+  for (int a = -11; a < 11; a++) {
+    for (int b = -11; b < 11; b++) {
       float choose_mat = randf();
       vec3 center;
       vec3_set(center, a + 0.9*randf(), 0.2, b + 0.9*randf());
@@ -357,18 +504,22 @@ int main(void) {
     }
   }
 
+  make_bvh_nodes(0, sphere_count);
+
   GLuint sphere_count_loc = glGetUniformLocation(program, "sphere_count");
   glUniform1i(sphere_count_loc, sphere_count);
 
+  GLuint bvh_count_loc = glGetUniformLocation(program, "bvh_count");
+  glUniform1i(bvh_count_loc, bvh_count);
+
   GLuint sph_loc = glGetUniformBlockIndex(program, "ObjBlock");
-  GLint size, stride;
   glUniformBlockBinding(program, sph_loc, 0);
   GLuint sph_buf;
   glGenBuffers(1, &sph_buf);
   glBindBuffer(GL_UNIFORM_BUFFER, sph_buf);
-  glBufferData(GL_UNIFORM_BUFFER, sizeof(Sphere)*MAX_OBJS, NULL, GL_STATIC_DRAW);
+  glBufferData(GL_UNIFORM_BUFFER, sizeof(Sphere)*MAX_SPH, NULL, GL_STATIC_DRAW);
   glBindBufferBase(GL_UNIFORM_BUFFER, 0, sph_buf);
-  glBindBufferRange(GL_UNIFORM_BUFFER, 2, sph_buf, 0, sizeof(Sphere)*MAX_OBJS);
+  glBindBufferRange(GL_UNIFORM_BUFFER, 0, sph_buf, 0, sizeof(Sphere)*MAX_SPH);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
@@ -378,20 +529,31 @@ int main(void) {
   glGenBuffers(1, &mat_buf);
   glBindBuffer(GL_UNIFORM_BUFFER, mat_buf);
   glBufferData(GL_UNIFORM_BUFFER,
-               sizeof(Lambert)*MAX_OBJS+sizeof(Metal)*MAX_OBJS+sizeof(Glass)*MAX_OBJS,
+               sizeof(Lambert)*MAX_MATS+sizeof(Metal)*MAX_MATS+sizeof(Glass)*MAX_MATS,
                NULL, GL_STATIC_DRAW);
   glBindBufferBase(GL_UNIFORM_BUFFER, 1, mat_buf);
-  glBindBufferRange(GL_UNIFORM_BUFFER, 2, mat_buf, 0,
-                    sizeof(Lambert)*MAX_OBJS + sizeof(Metal)*MAX_OBJS + sizeof(Glass)*MAX_OBJS);
+  glBindBufferRange(GL_UNIFORM_BUFFER, 1, mat_buf, 0,
+                    sizeof(Lambert)*MAX_MATS + sizeof(Metal)*MAX_MATS + sizeof(Glass)*MAX_MATS);
   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Lambert)*lambert_count, lamberts);
   glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(Lambert)*MAX_OBJS,
+                  sizeof(Lambert)*MAX_MATS,
                   sizeof(Metal)*metal_count,
                   metals);
   glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(Lambert)*MAX_OBJS + sizeof(Metal)*MAX_OBJS,
+                  sizeof(Lambert)*MAX_MATS + sizeof(Metal)*MAX_MATS,
                   sizeof(Glass)*glass_count,
                   glass);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  GLuint bvh_loc = glGetUniformBlockIndex(program, "BvhBlock");
+  glUniformBlockBinding(program, bvh_loc, 2);
+  GLuint bvh_buf;
+  glGenBuffers(1, &bvh_buf);
+  glBindBuffer(GL_UNIFORM_BUFFER, bvh_buf);
+  glBufferData(GL_UNIFORM_BUFFER, sizeof(BVHNode)*MAX_BVH, NULL, GL_STATIC_DRAW);
+  glBindBufferBase(GL_UNIFORM_BUFFER, 2, bvh_buf);
+  glBindBufferRange(GL_UNIFORM_BUFFER, 2, bvh_buf, 0, sizeof(BVHNode)*MAX_BVH);
+  glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(BVHNode)*bvh_count, bvh_nodes);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
   glfwGetCursorPos(window, &last_mouse[0], &last_mouse[1]);
@@ -400,12 +562,21 @@ int main(void) {
   glfwSetCursorPosCallback(window, on_mouse_move);
   glfwSetScrollCallback(window, on_scroll);
 
+  int nframes = 0;
+  float last_time = glfwGetTime();
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
 
     float t = glfwGetTime();
     glUniform1f(time_loc, t);
     glUniform1ui(utime_loc, (GLuint)t);
+
+    nframes++;
+    if (t - last_time > 1.0) {
+      printf("FPS %i\n", nframes);
+      nframes = 0;
+      last_time += 1.0;
+    }
 
     glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
 
