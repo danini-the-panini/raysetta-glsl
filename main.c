@@ -337,6 +337,19 @@ static inline void aabb_copy(aabb r, aabb const b) {
   vec3_copy(r[1], b[1]);
 }
 
+static inline void aabb_padmin(aabb self) {
+  float delta = 0.0001; 
+  float pad = delta / 2.0;
+  float size;
+  for (int i = 0; i < 3; i++) {
+    size = self[1][i] - self[0][i];
+    if (size < delta) {
+      self[0][i] -= pad;
+      self[1][i] += pad;
+    }
+  }
+}
+
 static inline void aabb_add(aabb r, aabb const a, aabb const b) {
   r[0][0] = fminf(a[0][0], b[0][0]);
   r[0][1] = fminf(a[0][1], b[0][1]);
@@ -345,6 +358,8 @@ static inline void aabb_add(aabb r, aabb const a, aabb const b) {
   r[1][0] = fmaxf(a[1][0], b[1][0]);
   r[1][1] = fmaxf(a[1][1], b[1][1]);
   r[1][2] = fmaxf(a[1][2], b[1][2]);
+
+  aabb_padmin(r);
 }
 
 static inline void aabb_make(aabb r, vec3 const a, vec3 const b) {
@@ -355,6 +370,7 @@ static inline void aabb_make(aabb r, vec3 const a, vec3 const b) {
   r[1][0] = fmaxf(a[0], b[0]);
   r[1][1] = fmaxf(a[1], b[1]);
   r[1][2] = fmaxf(a[2], b[2]);
+  aabb_padmin(r);
 }
 
 static inline int aabb_longest(aabb const a) {
@@ -552,6 +568,28 @@ static inline int make_tri(vec3 a, vec3 b, vec3 c, int mat_type, int mat_id) {
   vec3_sub(u, b, a);
   vec3_sub(v, c, a);
   return make_plane(a, u, v, TRI, mat_type, mat_id);
+}
+
+static inline void make_box(vec3 a, vec3 b, int mat_type, int mat_id) {
+  vec3 dx, dy, dz, ndx, ndz;
+
+  float min_x = fminf(a[0], b[0]); float max_x = fmaxf(a[0], b[0]);
+  float min_y = fminf(a[1], b[1]); float max_y = fmaxf(a[1], b[1]);
+  float min_z = fminf(a[2], b[2]); float max_z = fmaxf(a[2], b[2]);
+
+  vec3_set(dx, max_x - min_x, 0.0, 0.0);
+  vec3_set(dy, 0.0, max_y - min_y, 0.0);
+  vec3_set(dz, 0.0, 0.0, max_z - min_z);
+
+  vec3_scale(ndx, dx, -1.0);
+  vec3_scale(ndz, dz, -1.0);
+
+  make_quad((vec3){min_x, min_y, max_z},  dx,  dy, mat_type, mat_id);  // front
+  make_quad((vec3){max_x, min_y, max_z}, ndz,  dy, mat_type, mat_id);  // right
+  make_quad((vec3){max_x, min_y, min_z}, ndx,  dy, mat_type, mat_id);  // back
+  make_quad((vec3){min_x, min_y, min_z},  dz,  dy, mat_type, mat_id);  // left
+  make_quad((vec3){min_x, max_y, max_z},  dx, ndz, mat_type, mat_id);  // top
+  make_quad((vec3){min_x, min_y, min_z},  dx,  dz, mat_type, mat_id);  // bottom
 }
 
 static inline int make_solid_color(vec3 albedo) {
@@ -848,6 +886,13 @@ int main(void) {
   make_quad((vec3){ 3.0, -2.0, 1.0}, (vec3){0.0, 0.0,  4.0}, (vec3){0.0, 4.0,  0.0}, LAMBERT, make_lambert_solid((vec3){0.2, 0.2, 1.0}));
   make_quad((vec3){-2.0,  3.0, 1.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 0.0,  4.0}, LAMBERT, make_lambert_solid((vec3){1.0, 0.5, 0.0}));
   make_quad((vec3){-2.0, -3.0, 5.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 0.0, -4.0}, LAMBERT, make_lambert_solid((vec3){0.2, 0.8, 0.8}));
+
+  make_box(
+    (vec3){-0.5, -0.5, 1.5},
+    (vec3){0.5, 0.5, 2.5},
+    LAMBERT,
+    make_lambert_solid((vec3){1.0, 0.0, 1.0})
+  );
 
   make_bvh_nodes(0, obj_count);
 
