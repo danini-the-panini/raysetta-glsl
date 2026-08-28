@@ -5,10 +5,22 @@ precision highp float;
 #define MAX_OBJS MAX_SPH
 #define MAX_MATS MAX_OBJS
 #define MAX_TEX MAX_MATS
-#define MAX_IMG 8
+#define MAX_IMG 64
+#define MAX_PERLIN 8
 const int MAX_BVH = MAX_OBJS*2+1;
 
 const float PI = 3.1415926535897932385;
+
+const ivec3 CUBE[8] = ivec3[](
+  ivec3(0, 0, 0),
+  ivec3(0, 0, 1),
+  ivec3(0, 1, 0),
+  ivec3(0, 1, 1),
+  ivec3(1, 0, 0),
+  ivec3(1, 0, 1),
+  ivec3(1, 1, 0),
+  ivec3(1, 1, 1)
+);
 
 float atan2(in float y, in float x) {
   if (x > 0.0) {
@@ -28,6 +40,10 @@ float atan2(in float y, in float x) {
       return 0.0/0.0; // NaN
     }
   }
+}
+
+vec3 smthstp(vec3 v) {
+  return v * v * (vec3(3.0) - 2.0 * v);
 }
 
 const float pos_inf = 1.0/0.0;
@@ -62,6 +78,7 @@ uniform uint frame;
 #define SOLID 0
 #define CHECKER 1
 #define IMAGE 2
+#define NOISE 3
 
 vec2 scr;
 float aspect;
@@ -122,6 +139,19 @@ struct Image {
   int height;
 };
 
+#define POINT_COUNT 256
+struct Perlin {
+  vec3 randvec[POINT_COUNT];
+  ivec3 perm[POINT_COUNT];
+};
+
+struct Noise {
+  int id;
+  float scale;
+  int depth;
+  int axis;
+};
+
 struct Sphere {
   vec3 center;
   vec3 vec;
@@ -160,6 +190,11 @@ layout (std140) uniform TexBlock {
   SolidColor solid_colors[MAX_TEX];
   Checker checkers[MAX_TEX];
   Image image_tex[MAX_IMG];
+  Noise noises[MAX_TEX];
+};
+
+layout (std140) uniform PerlinBlock {
+  Perlin perlins[MAX_PERLIN];
 };
 
 layout (std140) uniform BvhBlock {
@@ -174,7 +209,7 @@ layout (location = 0) out vec4 outColor;
 int rand_index;
 float rand() {
   vec4 r = texelFetch(noise, rand_index, 0);
-  rand_index++;
+  rand_index = (rand_index+1)%noise_size;
   return r.x;
 }
 
@@ -280,12 +315,73 @@ vec3 image_sample(Image tex, vec2 uv, vec3 pt) {
   ).xyz;
 }
 
+float perlin_interp(vec3 c[8], vec3 vc) {
+  vec3 v = smthstp(vc);
+  float sum = 0.0;
+
+  for (int n = 0; n < 8; n++) {
+    int i = CUBE[n].x;
+    int j = CUBE[n].y;
+    int k = CUBE[n].z;
+
+    vec3 w = vc - vec3(i, j, k);
+    sum +=
+      (i * v.x + (1 - i) * (1 - v.x)) *
+      (j * v.y + (1 - j) * (1 - v.y)) *
+      (k * v.z + (1 - k) * (1 - v.z)) *
+      dot(c[n], w);
+  }
+  return sum;
+}
+
+float perlin_noise(Perlin self, vec3 pt) {
+  ivec3 iv = ivec3(floor(pt));
+  vec3 vc = fract(pt);
+
+  vec3 c[8];
+
+  for (int n = 0; n < 8; n++) {
+    c[n] = self.randvec[
+      self.perm[(iv.x + CUBE[n].x) & 255].x ^
+      self.perm[(iv.y + CUBE[n].y) & 255].y ^
+      self.perm[(iv.z + CUBE[n].z) & 255].z
+    ];
+  }
+
+  return perlin_interp(c, vc);
+}
+
+float turb(Perlin self, vec3 pt, int d) {
+  float accum = 0.0;
+  vec3 tmp = pt;
+  float w = 1.0;
+
+  for (int i = 0; i < d; i++) {
+    accum += w * perlin_noise(self, tmp);
+    w *= 0.5;
+    tmp *= 2.0;
+  }
+
+  return abs(accum);
+}
+
+vec3 noise_sample(Noise tex, vec2 uv, vec3 pt) {
+  Perlin noise = perlins[tex.id];
+  // return vec3(1.0) * 0.5 * (1.0 + perlin_noise(noise, pt * tex.scale));
+  if (tex.axis < 0) {
+    return vec3(1.0) * turb(noise, pt, tex.depth);
+  } else {
+    return vec3(0.5) * (1.0 + sin(tex.scale * pt[tex.axis] + 10.0 * turb(noise, pt, tex.depth)));
+  }
+}
+
 vec3 nochk_tex_sample(TypeId tex, vec2 uv, vec3 pt) {
   if (tex.type == SOLID) {
     return solid_sample(solid_colors[tex.id], uv, pt);
   } else if (tex.type == IMAGE) {
-    // return vec3(0.0, 1.0, 1.0);
     return image_sample(image_tex[tex.id], uv, pt);
+  } else if (tex.type == NOISE) {
+    return noise_sample(noises[tex.id], uv, pt);
   } else {
     return vec3(1.0, 0.0, 1.0);
   }

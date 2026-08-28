@@ -28,12 +28,14 @@
 #define SOLID 0
 #define CHECKER 1
 #define IMAGE 2
+#define NOISE 3
 
 #define MAX_SPH 500
 #define MAX_OBJS MAX_SPH
 #define MAX_MATS MAX_OBJS
 #define MAX_TEX MAX_MATS
-#define MAX_IMG 8
+#define MAX_IMG 64
+#define MAX_PERLIN 8
 
 typedef vec4 aabb[2];
 
@@ -98,6 +100,21 @@ typedef struct image_tex {
   float __0;
 } ImageTex;
 
+#define POINT_COUNT 256
+typedef int ivec3[3];
+typedef int ivec4[4];
+typedef struct perlin {
+  vec4 randvec[POINT_COUNT];
+  ivec4 perm[POINT_COUNT];
+} Perlin;
+
+typedef struct noise {
+  int id;
+  float scale;
+  int depth;
+  int axis;
+} Noise;
+
 static inline void glErrorCheck(const char *msg) {
   GLenum err = glGetError();
   if (err == GL_NO_ERROR) return;
@@ -112,6 +129,21 @@ static inline void glErrorCheck(const char *msg) {
   }
 }
 
+static inline void shuffle_perm(ivec4 *array, size_t n) {
+  if (n > 1)  {
+    size_t i, j, k;
+    int t;
+    for (i = 0; i < n - 1; i++)  {
+      for (k = 0; k < 4; k++) {
+        j = i + rand() / (RAND_MAX / (n - i) + 1);
+        t = array[j][k];
+        array[j][k] = array[i][k];
+        array[i][k] = t;
+      }
+    }
+  }
+}
+
 static inline unsigned int next_po2(unsigned int v) {
   v--;
   v |= v >> 1;
@@ -123,6 +155,12 @@ static inline unsigned int next_po2(unsigned int v) {
 }
 
 static inline void vec3_set(vec3 v, float x, float y, float z) {
+  v[0] = x;
+  v[1] = y;
+  v[2] = z;
+}
+
+static inline void ivec3_set(ivec3 v, int x, int y, int z) {
   v[0] = x;
   v[1] = y;
   v[2] = z;
@@ -237,6 +275,7 @@ static inline GLuint make_unibuffer(GLuint program, GLsizei size, const char *na
   glBindBufferBase(GL_UNIFORM_BUFFER, unibuf_count, buf);
   glBindBufferRange(GL_UNIFORM_BUFFER, unibuf_count, buf, 0, size);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
+  glErrorCheck("make unibuffer");
   unibuf_count++;
   return buf;
 }
@@ -244,7 +283,7 @@ static inline GLuint make_unibuffer(GLuint program, GLsizei size, const char *na
 static bool clear = true;
 static Camera cam;
 static double last_mouse[2];
-static float orbit_max = 100.0;
+static float orbit_max = 1000.0;
 static float orbit_min = 0.1;
 static GLuint frame = 0;
 
@@ -257,6 +296,8 @@ static int glass_count = 0;
 static int solid_color_count = 0;
 static int checker_count = 0;
 static int image_tex_count = 0;
+static int perlin_count;
+static int noise_count;
 static Sphere spheres[MAX_SPH];
 static const int MAX_BVH = MAX_OBJS*2+1;
 static BVHNode bvh_nodes[MAX_OBJS*2+1];
@@ -267,6 +308,8 @@ static Glass glass[MAX_MATS];
 static SolidColor solid_colors[MAX_TEX];
 static Checker checkers[MAX_TEX];
 static ImageTex image_tex[MAX_IMG];
+static Perlin perlins[MAX_PERLIN];
+static Noise noises[MAX_TEX];
 
 static inline void aabb_copy(aabb r, aabb b) {
   vec3_copy(r[0], b[0]);
@@ -463,6 +506,42 @@ static inline int make_image_tex_from_file(const char *filename) {
   return make_image_tex(load_image(filename));
 }
 
+static inline int make_perlin() {
+  if (perlin_count > MAX_PERLIN) {
+    fprintf(stderr, "maximum number of perlin noises reached (%i)", MAX_PERLIN);
+    return -1;
+  }
+  vec3 tmp;
+  for (int i = 0; i < POINT_COUNT; i++) {
+    vec3_set(tmp, randf_r(-1.0, 1.0), randf_r(-1.0, 1.0), randf_r(-1.0, 1.0));
+    vec3_norm(perlins[perlin_count].randvec[i], tmp);
+    ivec3_set(perlins[perlin_count].perm[i], i, i, i);
+  }
+  shuffle_perm(perlins[perlin_count].perm, POINT_COUNT);
+  for (int i = 0; i < POINT_COUNT; i++) {
+    vec3_copy(tmp, perlins[perlin_count].randvec[i]);
+    printf("%i: (%f, %f, %f) / [%i, %i, %i]\n", i, tmp[0], tmp[1], tmp[2],
+           perlins[perlin_count].perm[i][0], perlins[perlin_count].perm[i][1], perlins[perlin_count].perm[i][2]);
+  }
+  return perlin_count++;
+}
+
+static inline int make_noise(int id, float scale, int depth, int axis) {
+  if (noise_count > MAX_TEX) {
+    fprintf(stderr, "maximum number of noise textures reached (%i)", MAX_PERLIN);
+    return -1;
+  }
+  noises[noise_count].id = id;
+  noises[noise_count].scale = scale;
+  noises[noise_count].depth = depth;
+  noises[noise_count].axis = axis;
+  return noise_count++;
+}
+
+static inline int make_perlin_noise(float scale, int depth, int axis) {
+  return make_noise(make_perlin(), scale, depth, axis);
+}
+
 static inline int make_lambert(int tex_type, int tex_id) {
   if (lambert_count >= MAX_MATS) {
     fprintf(stderr, "maximum number of lamberts reached (%i)", MAX_MATS);
@@ -542,7 +621,7 @@ int main(void) {
   int version = gladLoadGL(glfwGetProcAddress);
   printf("GL %d.%d\n", GLAD_VERSION_MAJOR(version), GLAD_VERSION_MINOR(version));
 
-  GLsizei max_tex = 1024;
+  GLsizei max_tex = 0;
   glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
 
   glEnable(GL_FRAMEBUFFER_SRGB);
@@ -583,7 +662,7 @@ int main(void) {
   GLuint noise_tex = 0;
   glGenTextures(1, &noise_tex);
   glBindTexture(GL_TEXTURE_1D, noise_tex);
-  glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_REPEAT);	
+  glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);	
   glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   glTexStorage1D(GL_TEXTURE_1D, 1, GL_R32F, max_tex);
@@ -599,7 +678,7 @@ int main(void) {
   GLuint noise_size_loc = glGetUniformLocation(program, "noise_size");
   glUniform1i(noise_size_loc, max_tex);
 
-  const int samples = 1;
+  const int samples = 2;
   const int depth = 10;
 
   GLuint samples_loc = glGetUniformLocation(program, "samples");
@@ -614,7 +693,7 @@ int main(void) {
   vec3_set(cam.tgt, 0.0, 0.0, 0.0);
   vec3_set(cam.vup, 0.0, 1.0, 0.0);
   cam.vfov = 20.0;
-  cam.defocus_angle = 0.6;
+  cam.defocus_angle = 0.0;
   cam.focus_dist = 10.0;
 
   GLuint eye_loc = glGetUniformLocation(program, "eye");
@@ -634,12 +713,15 @@ int main(void) {
   int gmat = make_glass(1.5);
 
   // ground
-  int ground_mat = make_lambert(CHECKER, make_solid_checker(0.32, (vec3){0.2, 0.3, 0.1}, (vec3){0.9, 0.9, 0.9}));
+  int noise_id = make_perlin_noise(10.0, 3, 2);
+  int ground_mat = make_lambert(CHECKER, make_checker(2.0, SOLID, make_solid_color((vec3){0.2, 0.3, 0.1}), NOISE, noise_id));
+  // int ground_mat = make_lambert(NOISE, noise_id);
   make_sphere((vec3){0.0, -1000.0, 0.0}, 1000.0, LAMBERT, ground_mat);
 
   make_sphere((vec3){0.0, 1.0, 0.0}, 1.0, GLASS, gmat);
   make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(IMAGE, make_image_tex_from_file("moon.png")));
-  make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal(IMAGE, make_image_tex_from_file("earth.jpg"), 0.0));
+  // make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(NOISE, noise_id));
+  make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal(IMAGE, make_image_tex_from_file("earth.png"), 0.0));
 
   for (int a = -11; a < 11; a++) {
     for (int b = -11; b < 11; b++) {
@@ -683,7 +765,8 @@ int main(void) {
 
   GLuint obj_buf = make_unibuffer(program, sizeof(Sphere)*MAX_SPH, "ObjBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, obj_buf);
-  glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
+  if (sphere_count > 0)
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind obj");
 
@@ -693,12 +776,13 @@ int main(void) {
                       sizeof(Glass)*MAX_MATS,
                     "MatBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, mat_buf);
-  glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Lambert)*lambert_count, lamberts);
-  glBufferSubData(GL_UNIFORM_BUFFER,
+  if (lambert_count > 0)
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Lambert)*lambert_count, lamberts);
+  if (metal_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
                   sizeof(Lambert)*MAX_MATS,
                   sizeof(Metal)*metal_count,
                   metals);
-  glBufferSubData(GL_UNIFORM_BUFFER,
+  if (glass_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
                   sizeof(Lambert)*MAX_MATS + sizeof(Metal)*MAX_MATS,
                   sizeof(Glass)*glass_count,
                   glass);
@@ -706,25 +790,38 @@ int main(void) {
 
   GLuint bvh_buf = make_unibuffer(program, sizeof(BVHNode)*MAX_BVH, "BvhBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, bvh_buf);
-  glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(BVHNode)*bvh_count, bvh_nodes);
+  if (bvh_count > 0)
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(BVHNode)*bvh_count, bvh_nodes);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind mat");
 
   GLuint tex_buf = make_unibuffer(program,
                     sizeof(SolidColor)*MAX_TEX+
                       sizeof(Checker)*MAX_TEX+
-                      sizeof(ImageTex)*MAX_IMG,
+                      sizeof(ImageTex)*MAX_IMG+
+                      sizeof(Noise)*MAX_TEX,
                     "TexBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, tex_buf);
-  glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(SolidColor)*solid_color_count, solid_colors);
-  glBufferSubData(GL_UNIFORM_BUFFER,
+  if (solid_color_count > 0)
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(SolidColor)*solid_color_count, solid_colors);
+  if (checker_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
                   sizeof(SolidColor)*MAX_TEX,
                   sizeof(Checker)*checker_count, checkers);
-  glBufferSubData(GL_UNIFORM_BUFFER,
+  if (image_tex_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
                   sizeof(SolidColor)*MAX_TEX + sizeof(Checker)*MAX_TEX,
                   sizeof(ImageTex)*image_tex_count, image_tex);
+  if (noise_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
+                  sizeof(SolidColor)*MAX_TEX + sizeof(Checker)*MAX_TEX + sizeof(ImageTex)*MAX_IMG,
+                  sizeof(Noise)*noise_count, noises);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind tex");
+
+  GLuint perl_buf = make_unibuffer(program, sizeof(Perlin)*MAX_PERLIN, "PerlinBlock");
+  glBindBuffer(GL_UNIFORM_BUFFER, perl_buf);
+  if (perlin_count > 0)
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Perlin)*perlin_count, perlins);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+  glErrorCheck("bind perlin");
 
   GLuint images_tex = 0;
   glGenTextures(1, &images_tex);
