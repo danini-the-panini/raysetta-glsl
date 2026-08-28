@@ -42,6 +42,10 @@
 #define MAX_IMG 64
 #define MAX_PERLIN 8
 
+#define GRAD 1
+#define CUBEMAP 2
+#define SPHMAP 3
+
 static const int MAX_OBJS = MAX_SPH+MAX_PLN;
 static const int MAX_BVH = MAX_OBJS*2+1;
 
@@ -140,6 +144,15 @@ typedef struct noise {
   int depth;
   int axis;
 } Noise;
+
+typedef struct gradient {
+  vec4 top;
+  vec4 bottom;
+} Gradient;
+
+typedef struct cube_map {
+  TypeId tex[6];
+} CubeMap;
 
 static inline void glErrorCheck(const char *msg) {
   GLenum err = glGetError();
@@ -339,6 +352,12 @@ static Checker checkers[MAX_TEX];
 static ImageTex image_tex[MAX_IMG];
 static Perlin perlins[MAX_PERLIN];
 static Noise noises[MAX_TEX];
+
+static SolidColor solid_bg;
+static Gradient grad_bg;
+static TypeId sphere_map;
+static CubeMap cube_map;
+static int bg_type = -1;
 
 static inline void aabb_copy(aabb r, aabb const b) {
   vec3_copy(r[0], b[0]);
@@ -645,6 +664,62 @@ static inline int make_image_tex_from_file(const char *filename) {
   return make_image_tex(load_image(filename));
 }
 
+static inline void make_solid_bg(vec3 col) {
+  vec3_copy(solid_bg.albedo, col);
+  bg_type = SOLID;
+}
+
+static inline void make_gradient_bg(vec3 top, vec3 bottom) {
+  vec3_copy(grad_bg.top, top);
+  vec3_copy(grad_bg.bottom, bottom);
+  bg_type = GRAD;
+}
+
+static inline void make_sphere_map(int type, int id) {
+  sphere_map.type = type;
+  sphere_map.id = id;
+  bg_type = SPHMAP;
+}
+
+static inline void make_sphere_map_from_file(const char *filename) {
+  make_sphere_map(IMAGE, make_image_tex_from_file(filename));
+}
+
+static inline void make_cube_map(
+  int type0, int id0,
+  int type1, int id1,
+  int type2, int id2,
+  int type3, int id3,
+  int type4, int id4,
+  int type5, int id5
+) {
+  cube_map.tex[0].type = type0; cube_map.tex[0].id = id0;
+  cube_map.tex[1].type = type1; cube_map.tex[1].id = id1;
+  cube_map.tex[2].type = type2; cube_map.tex[2].id = id2;
+  cube_map.tex[3].type = type3; cube_map.tex[3].id = id3;
+  cube_map.tex[4].type = type4; cube_map.tex[4].id = id4;
+  cube_map.tex[5].type = type5; cube_map.tex[5].id = id5;
+  bg_type = CUBEMAP;
+}
+
+static inline void make_cube_map_from_files(
+  const char *f0,
+  const char *f1,
+  const char *f2,
+  const char *f3,
+  const char *f4,
+  const char *f5
+) {
+  make_cube_map(
+    IMAGE, make_image_tex_from_file(f0),
+    IMAGE, make_image_tex_from_file(f1),
+    IMAGE, make_image_tex_from_file(f2),
+    IMAGE, make_image_tex_from_file(f3),
+    IMAGE, make_image_tex_from_file(f4),
+    IMAGE, make_image_tex_from_file(f5)
+  );
+}
+
 static inline int make_perlin() {
   if (perlin_count > MAX_PERLIN) {
     fprintf(stderr, "maximum number of perlin noises reached (%i)", MAX_PERLIN);
@@ -826,8 +901,8 @@ int main(void) {
   GLuint noise_size_loc = glGetUniformLocation(program, "noise_size");
   glUniform1i(noise_size_loc, max_tex);
 
-  const int samples = 2;
-  const int depth = 10;
+  const int samples = 1;
+  const int depth = 5;
 
   GLuint samples_loc = glGetUniformLocation(program, "samples");
   glUniform1i(samples_loc, samples);
@@ -858,63 +933,66 @@ int main(void) {
   glUniform1f(focus_dist_loc, cam.focus_dist);
   glErrorCheck("cam");
 
-  // int gmat = make_glass(1.5);
+  int gmat = make_glass(1.5);
 
-  // // ground
-  // int noise_id = make_perlin_noise(10.0, 3, 2);
+  // ground
+  int noise_id = make_perlin_noise(10.0, 3, 2);
   // int ground_mat = make_lambert(CHECKER, make_checker(2.0, SOLID, make_solid_color((vec3){0.2, 0.3, 0.1}), NOISE, noise_id));
-  // // int ground_mat = make_lambert(NOISE, noise_id);
-  // make_sphere((vec3){0.0, -1000.0, 0.0}, 1000.0, LAMBERT, ground_mat);
+  int ground_mat = make_lambert(CHECKER, make_solid_checker(2.0, (vec3){0.2, 0.3, 0.1}, (vec3){0.9, 0.9, 0.9}));
+  // int ground_mat = make_lambert(NOISE, noise_id);
+  make_sphere((vec3){0.0, -1000.0, 0.0}, 1000.0, LAMBERT, ground_mat);
 
-  // make_sphere((vec3){0.0, 1.0, 0.0}, 1.0, GLASS, gmat);
-  // make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(IMAGE, make_image_tex_from_file("moon.png")));
-  // // make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(NOISE, noise_id));
-  // make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal(IMAGE, make_image_tex_from_file("earth.png"), 0.0));
+  make_sphere((vec3){0.0, 1.0, 0.0}, 1.0, GLASS, gmat);
+  make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(IMAGE, make_image_tex_from_file("moon.png")));
+  // make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(NOISE, noise_id));
+  make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal(IMAGE, make_image_tex_from_file("earth.png"), 0.0));
 
-  // for (int a = -11; a < 11; a++) {
-  //   for (int b = -11; b < 11; b++) {
-  //     float choose_mat = randf();
-  //     vec3 center;
-  //     vec3_set(center, a + 0.9*randf(), 0.2, b + 0.9*randf());
+  for (int a = -11; a < 11; a++) {
+    for (int b = -11; b < 11; b++) {
+      float choose_mat = randf();
+      vec3 center;
+      vec3_set(center, a + 0.9*randf(), 0.2, b + 0.9*randf());
 
-  //     vec3 tmp;
-  //     vec3_sub(tmp, center, (vec3){4.0, 0.2, 0.0});
-  //     if (vec3_len(tmp) > 0.9) {
-  //       if (choose_mat < 0.8) {
-  //         // diffuse
-  //         vec3 r, c, center2;
-  //         vec3_rand(r);
-  //         vec3_rand(c);
-  //         vec3_mul(c, c, r);
-  //         vec3_add(center2, center, (vec3){0.0, randf()*0.5, 0.0});
-  //         make_moving_sphere(center, center2, 0.2, LAMBERT, make_lambert_solid(c));
-  //       } else if (choose_mat < 0.95) {
-  //         // metal
-  //         vec3 r, c;
-  //         vec3_rand(r);
-  //         vec3_rand(c);
-  //         vec3_mul(c, c, r);
-  //         make_sphere(center, 0.2, METAL, make_metal_solid(c, randf()*0.5));
-  //       } else {
-  //         // glass
-  //         make_sphere(center, 0.2, GLASS, gmat);
-  //       }
-  //     }
-  //   }
-  // }
+      vec3 tmp;
+      vec3_sub(tmp, center, (vec3){4.0, 0.2, 0.0});
+      if (vec3_len(tmp) > 0.9) {
+        if (choose_mat < 0.8) {
+          // diffuse
+          vec3 r, c, center2;
+          vec3_rand(r);
+          vec3_rand(c);
+          vec3_mul(c, c, r);
+          vec3_add(center2, center, (vec3){0.0, randf()*0.5, 0.0});
+          make_moving_sphere(center, center2, 0.2, LAMBERT, make_lambert_solid(c));
+        } else if (choose_mat < 0.95) {
+          // metal
+          vec3 r, c;
+          vec3_rand(r);
+          vec3_rand(c);
+          vec3_mul(c, c, r);
+          make_sphere(center, 0.2, METAL, make_metal_solid(c, randf()*0.5));
+        } else {
+          // glass
+          make_sphere(center, 0.2, GLASS, gmat);
+        }
+      }
+    }
+  }
 
-  make_tri((vec3){-3.0, -2.0, 5.0}, (vec3){-3.0, -2.0, 1.0}, (vec3){-3.0, 2.0,  5.0}, LAMBERT, make_lambert_solid((vec3){1.0, 0.2, 0.2}));
-  make_quad((vec3){-2.0, -2.0, 0.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 4.0,  0.0}, LAMBERT, make_lambert_solid((vec3){0.2, 1.0, 0.2}));
-  make_quad((vec3){ 3.0, -2.0, 1.0}, (vec3){0.0, 0.0,  4.0}, (vec3){0.0, 4.0,  0.0}, LAMBERT, make_lambert_solid((vec3){0.2, 0.2, 1.0}));
-  make_quad((vec3){-2.0,  3.0, 1.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 0.0,  4.0}, LAMBERT, make_lambert_solid((vec3){1.0, 0.5, 0.0}));
-  make_quad((vec3){-2.0, -3.0, 5.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 0.0, -4.0}, LAMBERT, make_lambert_solid((vec3){0.2, 0.8, 0.8}));
+  // make_tri((vec3){-3.0, -2.0, 5.0}, (vec3){-3.0, -2.0, 1.0}, (vec3){-3.0, 2.0,  5.0}, LAMBERT, make_lambert_solid((vec3){1.0, 0.2, 0.2}));
+  // make_quad((vec3){-2.0, -2.0, 0.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 4.0,  0.0}, LAMBERT, make_lambert_solid((vec3){0.2, 1.0, 0.2}));
+  // make_quad((vec3){ 3.0, -2.0, 1.0}, (vec3){0.0, 0.0,  4.0}, (vec3){0.0, 4.0,  0.0}, LAMBERT, make_lambert_solid((vec3){0.2, 0.2, 1.0}));
+  // make_quad((vec3){-2.0,  3.0, 1.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 0.0,  4.0}, LAMBERT, make_lambert_solid((vec3){1.0, 0.5, 0.0}));
+  // make_quad((vec3){-2.0, -3.0, 5.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 0.0, -4.0}, LAMBERT, make_lambert_solid((vec3){0.2, 0.8, 0.8}));
 
-  make_box(
-    (vec3){-0.5, -0.5, 1.5},
-    (vec3){0.5, 0.5, 2.5},
-    LIGHT,
-    make_light_solid((vec3){10.0, 10.0, 10.0})
-  );
+  // make_box(
+  //   (vec3){-0.5, -0.5, 1.5},
+  //   (vec3){0.5, 0.5, 2.5},
+  //   LIGHT,
+  //   make_light_solid((vec3){10.0, 10.0, 10.0})
+  // );
+
+  make_sphere_map_from_file("chinese_garden_4k.hdr");
 
   make_bvh_nodes(0, obj_count);
 
@@ -957,7 +1035,7 @@ int main(void) {
   glBindBuffer(GL_UNIFORM_BUFFER, bvh_buf);
   if (bvh_count > 0)
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(BVHNode)*bvh_count, bvh_nodes);
- ; glBindBuffer(GL_UNIFORM_BUFFER, 0);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind mat");
 
   GLuint tex_buf = make_unibuffer(program,
@@ -987,6 +1065,19 @@ int main(void) {
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Perlin)*perlin_count, perlins);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind perlin");
+
+  GLuint bg_buf = make_unibuffer(program, sizeof(SolidColor)+sizeof(Gradient)+sizeof(TypeId)+sizeof(CubeMap), "BgBlock");
+  glBindBuffer(GL_UNIFORM_BUFFER, bg_buf);
+  switch (bg_type) {
+  case SOLID: glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(SolidColor), &solid_bg); break;
+  case GRAD: glBufferSubData(GL_UNIFORM_BUFFER, sizeof(SolidColor), sizeof(Gradient), &grad_bg); break;
+  case SPHMAP: glBufferSubData(GL_UNIFORM_BUFFER, sizeof(SolidColor)+sizeof(Gradient), sizeof(TypeId), &sphere_map); break;
+  case CUBEMAP: glBufferSubData(GL_UNIFORM_BUFFER, sizeof(SolidColor)+sizeof(Gradient)+sizeof(TypeId), sizeof(CubeMap), &cube_map); break;
+  }
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+  GLuint bg_type_loc = glGetUniformLocation(program, "bg_type");
+  glUniform1i(bg_type_loc, bg_type);
+  glErrorCheck("bind bg");
 
   GLuint images_tex = 0;
   glGenTextures(1, &images_tex);

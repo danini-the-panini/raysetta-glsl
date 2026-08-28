@@ -86,6 +86,10 @@ uniform uint frame;
 #define IMAGE 2
 #define NOISE 3
 
+#define GRAD 1
+#define CUBEMAP 2
+#define SPHMAP 3
+
 vec2 scr;
 float aspect;
 float flen;
@@ -197,6 +201,15 @@ struct BVHNode {
   AABB bbox;
 };
 
+struct Gradient {
+  vec3 top;
+  vec3 bottom;
+};
+
+struct CubeMap {
+  TypeId ids[6];
+};
+
 layout (std140) uniform ObjBlock {
   Sphere spheres[MAX_SPH];
   Plane planes[MAX_PLN];
@@ -222,6 +235,14 @@ layout (std140) uniform PerlinBlock {
 
 layout (std140) uniform BvhBlock {
   BVHNode bvh[MAX_BVH];
+};
+
+uniform int bg_type;
+layout (std140) uniform BgBlock {
+  SolidColor solid_bg;
+  Gradient grad_bg;
+  TypeId sphere_map;
+  CubeMap cube_map;
 };
 
 uniform int bvh_count;
@@ -676,11 +697,50 @@ Ray get_ray() {
   return Ray(ray_orig, ray_dir, rand());
 }
 
+vec3 sample_cube_map(Ray ray) {
+  vec3 v = ray.dir;
+  vec3 vabs = abs(v);
+
+  int fi = -1;
+  float ma;
+  vec2 uv;
+  if (vabs.z >= vabs.x && vabs.z >= vabs.y) {
+    // front/back
+    fi = v.z < 0.0 ? 5 : 4;
+    ma = 0.5 / vabs.z;
+    uv = vec2(v.z < 0.0 ? -v.x : v.x, v.y);
+  } else if (vabs.y >= vabs.x) {
+    // top/bottom
+    fi = v.y < 0.0 ? 3 : 2;
+    ma = 0.5 / vabs.y;
+    uv = vec2(v.x, v.y < 0.0 ? v.z : -v.z);
+  } else {
+    // left/right
+    fi = v.x < 0.0 ? 1 : 0;
+    ma = 0.5 / vabs.x;
+    uv = vec2(v.x < 0.0 ? v.z : -v.z, v.y);
+  }
+
+  uv = uv * ma + vec2(0.5);
+  return tex_sample(cube_map.ids[fi], uv, normalize(v));
+}
+
 vec3 bg_color(Ray ray) {
-  // vec3 unit_dir = normalize(ray.dir);
-  // float a = 0.5*(unit_dir.y + 1.0);
-  // return (1.0-a)*vec3(1.0, 1.0, 1.0) + a*vec3(0.5, 0.7, 1.0);
-  return vec3(0.2, 0.2, 0.2);
+  if (bg_type == SOLID) {
+    return solid_bg.albedo;
+  } else if (bg_type == GRAD) {
+    vec3 unit_dir = normalize(ray.dir);
+    float a = 0.5*(unit_dir.y + 1.0);
+    return mix(grad_bg.top, grad_bg.bottom, a);
+  } else if (bg_type == SPHMAP) {
+    vec3 unit_dir = normalize(ray.dir);
+    vec2 uv = sphere_uv(unit_dir);
+    return tex_sample(sphere_map, uv, unit_dir);
+  } else if (bg_type == CUBEMAP) {
+    return sample_cube_map(ray);
+  } else {
+    return vec3(1.0, 0.0, 0.0);
+  }
 }
 
 bool ray_color1(Ray ray, out Ray ray2, out vec3 col) {
