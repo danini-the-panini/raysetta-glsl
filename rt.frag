@@ -2,7 +2,8 @@
 precision highp float;
 
 #define MAX_SPH 500
-#define MAX_OBJS MAX_SPH
+#define MAX_PLN 100
+const int  MAX_OBJS = MAX_SPH+MAX_PLN;
 #define MAX_MATS MAX_OBJS
 #define MAX_TEX MAX_MATS
 #define MAX_IMG 64
@@ -74,6 +75,10 @@ uniform uint frame;
 
 #define SPHERE 0
 #define BVH 1
+#define PLANE 2
+
+#define QUAD 0
+#define TRI 1
 
 #define SOLID 0
 #define CHECKER 1
@@ -159,6 +164,17 @@ struct Sphere {
   TypeId mat;
 };
 
+struct Plane {
+  vec3 q;
+  vec3 u;
+  vec3 v;
+  vec3 n;
+  float d;
+  vec3 w;
+  int type;
+  TypeId mat;
+};
+
 struct Hit {
   float t;
   bool front;
@@ -178,6 +194,7 @@ struct BVHNode {
 
 layout (std140) uniform ObjBlock {
   Sphere spheres[MAX_SPH];
+  Plane planes[MAX_PLN];
 };
 
 layout (std140) uniform MatBlock {
@@ -201,7 +218,6 @@ layout (std140) uniform BvhBlock {
   BVHNode bvh[MAX_BVH];
 };
 
-uniform int sphere_count;
 uniform int bvh_count;
 in vec2 uv;
 layout (location = 0) out vec4 outColor;
@@ -538,9 +554,58 @@ bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
   return true;
 }
 
+bool quad_interior(float a, float b, out vec2 uv) {
+  Range unit = Range(0.0, 1.0);
+
+  if (!surrounds(unit, a) || !surrounds(unit, b)) return false;
+  
+  uv = vec2(a, b);
+  return true;
+}
+
+bool tri_interior(float a, float b, out vec2 uv) {
+  if (a < 0.0 || b < 0.0 || a + b > 1.0) return false;
+
+  uv = vec2(a, b);
+  return true;
+}
+
+bool hit_plane(Plane self, Ray ray, Range ray_t, out Hit hit) {
+  float denom = dot(self.n, ray.dir);
+
+  // No hit if the ray is parallel to the plane.
+  if (abs(denom) < 1e-6) return false;
+
+  // Return if the hit point parameter t is outside the ray interval.
+  float t = (self.d - dot(self.n, ray.orig)) / denom;
+  if (!surrounds(ray_t, t)) return false;
+
+  vec3 inter = ray_at(ray, t);
+  vec3 phv = inter - self.q;
+  float a = dot(self.w, cross(phv, self.v));
+  float b = dot(self.w, cross(self.u, phv));
+
+  if (self.type == QUAD) {
+    if (!quad_interior(a, b, hit.uv)) return false;
+  } else if (self.type == TRI) {
+    if (!tri_interior(a, b, hit.uv)) return false;
+  } else {
+    return false;
+  }
+
+  hit.p = inter;
+  hit.t = t;
+  hit.mat = self.mat;
+  set_face_normal(ray, self.n, hit);
+
+  return true;
+}
+
 bool hit_obj(int type, int id, Ray r, Range rt, out Hit hit) {
   if (type == SPHERE) {
     return hit_sphere(spheres[id], r, rt, hit);
+  } else if (type == PLANE) {
+    return hit_plane(planes[id], r, rt, hit);
   } else {
     return false;
   }

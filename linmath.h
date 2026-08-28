@@ -13,7 +13,7 @@
 
 #define LINMATH_H_DEFINE_VEC(n) \
 typedef float vec##n[n]; \
-LINMATH_H_FUNC void vec##n##_copy(vec##n r, vec##n v) \
+LINMATH_H_FUNC void vec##n##_copy(vec##n r, vec##n const v) \
 { \
 	int i; \
 	for(i=0; i<n; ++i) \

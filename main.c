@@ -24,6 +24,10 @@
 
 #define SPHERE 0
 #define BVH 1
+#define PLANE 2
+
+#define QUAD 0
+#define TRI 1
 
 #define SOLID 0
 #define CHECKER 1
@@ -31,7 +35,8 @@
 #define NOISE 3
 
 #define MAX_SPH 500
-#define MAX_OBJS MAX_SPH
+#define MAX_PLN 100
+static const int  MAX_OBJS  = MAX_SPH+MAX_PLN;
 #define MAX_MATS MAX_OBJS
 #define MAX_TEX MAX_MATS
 #define MAX_IMG 64
@@ -60,6 +65,20 @@ typedef struct sphere {
   float radius;
   TypeId mat;
 } Sphere;
+
+typedef struct plane {
+  vec3 q;
+  float __0;
+  vec3 u;
+  float __1;
+  vec3 v;
+  float __2;
+  vec3 n;
+  float d;
+  vec3 w;
+  int type;
+  TypeId mat;
+} Plane;
 
 typedef struct object {
   int id;
@@ -289,6 +308,7 @@ static GLuint frame = 0;
 
 static int bvh_count = 0;
 static int sphere_count = 0;
+static int plane_count = 0;
 static int obj_count = 0;
 static int lambert_count = 0;
 static int metal_count = 0;
@@ -299,6 +319,7 @@ static int image_tex_count = 0;
 static int perlin_count;
 static int noise_count;
 static Sphere spheres[MAX_SPH];
+static Plane planes[MAX_PLN];
 static const int MAX_BVH = MAX_OBJS*2+1;
 static BVHNode bvh_nodes[MAX_OBJS*2+1];
 static Object objects[MAX_OBJS];
@@ -311,12 +332,12 @@ static ImageTex image_tex[MAX_IMG];
 static Perlin perlins[MAX_PERLIN];
 static Noise noises[MAX_TEX];
 
-static inline void aabb_copy(aabb r, aabb b) {
+static inline void aabb_copy(aabb r, aabb const b) {
   vec3_copy(r[0], b[0]);
   vec3_copy(r[1], b[1]);
 }
 
-static inline void aabb_add(aabb r, aabb a, aabb b) {
+static inline void aabb_add(aabb r, aabb const a, aabb const b) {
   r[0][0] = fminf(a[0][0], b[0][0]);
   r[0][1] = fminf(a[0][1], b[0][1]);
   r[0][2] = fminf(a[0][2], b[0][2]);
@@ -326,7 +347,7 @@ static inline void aabb_add(aabb r, aabb a, aabb b) {
   r[1][2] = fmaxf(a[1][2], b[1][2]);
 }
 
-static inline void aabb_make(aabb r, vec3 a, vec3 b) {
+static inline void aabb_make(aabb r, vec3 const a, vec3 const b) {
   r[0][0] = fminf(a[0], b[0]);
   r[0][1] = fminf(a[1], b[1]);
   r[0][2] = fminf(a[2], b[2]);
@@ -336,7 +357,7 @@ static inline void aabb_make(aabb r, vec3 a, vec3 b) {
   r[1][2] = fmaxf(a[2], b[2]);
 }
 
-static inline int aabb_longest(aabb a) {
+static inline int aabb_longest(aabb const a) {
   float xsize = a[1][0] - a[0][0];
   float ysize = a[1][1] - a[0][1];
   float zsize = a[1][2] - a[0][2];
@@ -361,9 +382,38 @@ static inline void sphere_bbox(aabb r, const Sphere *sph) {
   aabb_add(r, box0, box1);
 }
 
+static inline void quad_bbox(aabb r, const Plane *pln) {
+  aabb d1, d2;
+  vec3 a, b;
+  vec3_add(a, pln->q, pln->u);
+  vec3_add(b, a, pln->v);
+  aabb_make(d1, pln->q, b);
+  vec3_add(b, pln->q, pln->v);
+  aabb_make(d2, a, b);
+  aabb_add(r, d1, d2);
+}
+
+static inline void tri_bbox(aabb r, const Plane *pln) {
+  aabb d1, d2;
+  vec3 a;
+  vec3_add(a, pln->q, pln->u);
+  aabb_make(d1, pln->q, a);
+  vec3_add(a, pln->q, pln->v);
+  aabb_make(d2, pln->q, a);
+  aabb_add(r, d1, d2);
+}
+
+static inline void plane_bbox(aabb r, const Plane *pln) {
+  switch (pln->type) {
+  case QUAD: quad_bbox(r, pln); break;
+  case TRI: tri_bbox(r, pln); break;
+  }
+}
+
 static inline void obj_bbox(aabb r, int type, int id) {
   switch (type) {
   case SPHERE: sphere_bbox(r, spheres+id); break;
+  case PLANE: plane_bbox(r, planes+id); break;
   case BVH: aabb_copy(r, bvh_nodes[id].bbox); break;
   }
 }
@@ -443,7 +493,7 @@ static inline int make_moving_sphere(vec3 center1, vec3 center2, float radius, i
     return -1;
   }
   if (obj_count >= MAX_OBJS) {
-    fprintf(stderr, "maximum number of objectss reached (%i)\n", MAX_OBJS);
+    fprintf(stderr, "maximum number of objects reached (%i)\n", MAX_OBJS);
     return -1;
   }
   vec3_copy(spheres[sphere_count].center, center1);
@@ -459,6 +509,49 @@ static inline int make_moving_sphere(vec3 center1, vec3 center2, float radius, i
 
 static inline int make_sphere(vec3 center, float radius, int mat_type, int mat_id) {
   return make_moving_sphere(center, center, radius, mat_type, mat_id);
+}
+
+static inline int make_plane(vec3 q, vec3 u, vec3 v, int plane_type, int mat_type, int mat_id) {
+  if (mat_id < 0) {
+    fprintf(stderr, "invalid material id (%i)\n'", mat_id);
+    return -1;
+  }
+  if (plane_count >= MAX_PLN) {
+    fprintf(stderr, "maximum number of planes reached (%i)\n", MAX_PLN);
+    return -1;
+  }
+  if (obj_count >= MAX_OBJS) {
+    fprintf(stderr, "maximum number of objects reached (%i)\n", MAX_OBJS);
+    return -1;
+  }
+  vec3_copy(planes[plane_count].q, q);
+  vec3_copy(planes[plane_count].u, u);
+  vec3_copy(planes[plane_count].v, v);
+  planes[plane_count].mat.type = mat_type;
+  planes[plane_count].mat.id = mat_id;
+  planes[plane_count].type = plane_type;
+
+  vec3 n;
+  vec3_mul_cross(n, u, v);
+  vec3_norm(planes[plane_count].n, n);
+  planes[plane_count].d = vec3_mul_inner(planes[plane_count].n, q);
+  vec3_scale(planes[plane_count].w, n, 1.0 / vec3_mul_inner(n, n));
+
+  objects[obj_count].type = PLANE;
+  objects[obj_count].id = plane_count;
+  obj_count++;
+  return plane_count++;
+}
+
+static inline int make_quad(vec3 q, vec3 u, vec3 v, int mat_type, int mat_id) {
+  return make_plane(q, u, v, QUAD, mat_type, mat_id);
+}
+
+static inline int make_tri(vec3 a, vec3 b, vec3 c, int mat_type, int mat_id) {
+  vec3 u, v;
+  vec3_sub(u, b, a);
+  vec3_sub(v, c, a);
+  return make_plane(a, u, v, TRI, mat_type, mat_id);
 }
 
 static inline int make_solid_color(vec3 albedo) {
@@ -518,11 +611,6 @@ static inline int make_perlin() {
     ivec3_set(perlins[perlin_count].perm[i], i, i, i);
   }
   shuffle_perm(perlins[perlin_count].perm, POINT_COUNT);
-  for (int i = 0; i < POINT_COUNT; i++) {
-    vec3_copy(tmp, perlins[perlin_count].randvec[i]);
-    printf("%i: (%f, %f, %f) / [%i, %i, %i]\n", i, tmp[0], tmp[1], tmp[2],
-           perlins[perlin_count].perm[i][0], perlins[perlin_count].perm[i][1], perlins[perlin_count].perm[i][2]);
-  }
   return perlin_count++;
 }
 
@@ -710,63 +798,68 @@ int main(void) {
   glUniform1f(focus_dist_loc, cam.focus_dist);
   glErrorCheck("cam");
 
-  int gmat = make_glass(1.5);
+  // int gmat = make_glass(1.5);
 
-  // ground
-  int noise_id = make_perlin_noise(10.0, 3, 2);
-  int ground_mat = make_lambert(CHECKER, make_checker(2.0, SOLID, make_solid_color((vec3){0.2, 0.3, 0.1}), NOISE, noise_id));
-  // int ground_mat = make_lambert(NOISE, noise_id);
-  make_sphere((vec3){0.0, -1000.0, 0.0}, 1000.0, LAMBERT, ground_mat);
+  // // ground
+  // int noise_id = make_perlin_noise(10.0, 3, 2);
+  // int ground_mat = make_lambert(CHECKER, make_checker(2.0, SOLID, make_solid_color((vec3){0.2, 0.3, 0.1}), NOISE, noise_id));
+  // // int ground_mat = make_lambert(NOISE, noise_id);
+  // make_sphere((vec3){0.0, -1000.0, 0.0}, 1000.0, LAMBERT, ground_mat);
 
-  make_sphere((vec3){0.0, 1.0, 0.0}, 1.0, GLASS, gmat);
-  make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(IMAGE, make_image_tex_from_file("moon.png")));
-  // make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(NOISE, noise_id));
-  make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal(IMAGE, make_image_tex_from_file("earth.png"), 0.0));
+  // make_sphere((vec3){0.0, 1.0, 0.0}, 1.0, GLASS, gmat);
+  // make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(IMAGE, make_image_tex_from_file("moon.png")));
+  // // make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(NOISE, noise_id));
+  // make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal(IMAGE, make_image_tex_from_file("earth.png"), 0.0));
 
-  for (int a = -11; a < 11; a++) {
-    for (int b = -11; b < 11; b++) {
-      float choose_mat = randf();
-      vec3 center;
-      vec3_set(center, a + 0.9*randf(), 0.2, b + 0.9*randf());
+  // for (int a = -11; a < 11; a++) {
+  //   for (int b = -11; b < 11; b++) {
+  //     float choose_mat = randf();
+  //     vec3 center;
+  //     vec3_set(center, a + 0.9*randf(), 0.2, b + 0.9*randf());
 
-      vec3 tmp;
-      vec3_sub(tmp, center, (vec3){4.0, 0.2, 0.0});
-      if (vec3_len(tmp) > 0.9) {
-        if (choose_mat < 0.8) {
-          // diffuse
-          vec3 r, c, center2;
-          vec3_rand(r);
-          vec3_rand(c);
-          vec3_mul(c, c, r);
-          vec3_add(center2, center, (vec3){0.0, randf()*0.5, 0.0});
-          make_moving_sphere(center, center2, 0.2, LAMBERT, make_lambert_solid(c));
-        } else if (choose_mat < 0.95) {
-          // metal
-          vec3 r, c;
-          vec3_rand(r);
-          vec3_rand(c);
-          vec3_mul(c, c, r);
-          make_sphere(center, 0.2, METAL, make_metal_solid(c, randf()*0.5));
-        } else {
-          // glass
-          make_sphere(center, 0.2, GLASS, gmat);
-        }
-      }
-    }
-  }
+  //     vec3 tmp;
+  //     vec3_sub(tmp, center, (vec3){4.0, 0.2, 0.0});
+  //     if (vec3_len(tmp) > 0.9) {
+  //       if (choose_mat < 0.8) {
+  //         // diffuse
+  //         vec3 r, c, center2;
+  //         vec3_rand(r);
+  //         vec3_rand(c);
+  //         vec3_mul(c, c, r);
+  //         vec3_add(center2, center, (vec3){0.0, randf()*0.5, 0.0});
+  //         make_moving_sphere(center, center2, 0.2, LAMBERT, make_lambert_solid(c));
+  //       } else if (choose_mat < 0.95) {
+  //         // metal
+  //         vec3 r, c;
+  //         vec3_rand(r);
+  //         vec3_rand(c);
+  //         vec3_mul(c, c, r);
+  //         make_sphere(center, 0.2, METAL, make_metal_solid(c, randf()*0.5));
+  //       } else {
+  //         // glass
+  //         make_sphere(center, 0.2, GLASS, gmat);
+  //       }
+  //     }
+  //   }
+  // }
 
-  make_bvh_nodes(0, sphere_count);
+  make_tri((vec3){-3.0, -2.0, 5.0}, (vec3){-3.0, -2.0, 1.0}, (vec3){-3.0, 2.0,  5.0}, LAMBERT, make_lambert_solid((vec3){1.0, 0.2, 0.2}));
+  make_quad((vec3){-2.0, -2.0, 0.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 4.0,  0.0}, LAMBERT, make_lambert_solid((vec3){0.2, 1.0, 0.2}));
+  make_quad((vec3){ 3.0, -2.0, 1.0}, (vec3){0.0, 0.0,  4.0}, (vec3){0.0, 4.0,  0.0}, LAMBERT, make_lambert_solid((vec3){0.2, 0.2, 1.0}));
+  make_quad((vec3){-2.0,  3.0, 1.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 0.0,  4.0}, LAMBERT, make_lambert_solid((vec3){1.0, 0.5, 0.0}));
+  make_quad((vec3){-2.0, -3.0, 5.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 0.0, -4.0}, LAMBERT, make_lambert_solid((vec3){0.2, 0.8, 0.8}));
 
-  GLuint sphere_count_loc = glGetUniformLocation(program, "sphere_count");
-  glUniform1i(sphere_count_loc, sphere_count);
+  make_bvh_nodes(0, obj_count);
 
   GLuint bvh_count_loc = glGetUniformLocation(program, "bvh_count");
   glUniform1i(bvh_count_loc, bvh_count);
 
-  GLuint obj_buf = make_unibuffer(program, sizeof(Sphere)*MAX_SPH, "ObjBlock");
+  GLuint obj_buf = make_unibuffer(program, sizeof(Sphere)*MAX_SPH+sizeof(Plane)*MAX_PLN, "ObjBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, obj_buf);
   if (sphere_count > 0)
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
+  if (plane_count> 0)
+    glBufferSubData(GL_UNIFORM_BUFFER, sizeof(Sphere)*MAX_SPH, sizeof(Plane)*plane_count, planes);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind obj");
 
