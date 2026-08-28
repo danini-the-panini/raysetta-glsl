@@ -21,6 +21,7 @@
 #define LAMBERT 0
 #define METAL 1
 #define GLASS 2
+#define LIGHT 3
 
 #define SPHERE 0
 #define BVH 1
@@ -36,11 +37,13 @@
 
 #define MAX_SPH 500
 #define MAX_PLN 100
-static const int  MAX_OBJS  = MAX_SPH+MAX_PLN;
 #define MAX_MATS MAX_OBJS
 #define MAX_TEX MAX_MATS
 #define MAX_IMG 64
 #define MAX_PERLIN 8
+
+static const int MAX_OBJS = MAX_SPH+MAX_PLN;
+static const int MAX_BVH = MAX_OBJS*2+1;
 
 typedef vec4 aabb[2];
 
@@ -99,6 +102,10 @@ typedef struct glass {
   float index;
   float __0[3];
 } Glass;
+
+typedef struct light {
+  TypeId tex;
+} Light;
 
 typedef struct solid_color {
   vec3 albedo;
@@ -311,6 +318,7 @@ static int sphere_count = 0;
 static int plane_count = 0;
 static int obj_count = 0;
 static int lambert_count = 0;
+static int light_count = 0;
 static int metal_count = 0;
 static int glass_count = 0;
 static int solid_color_count = 0;
@@ -320,10 +328,10 @@ static int perlin_count;
 static int noise_count;
 static Sphere spheres[MAX_SPH];
 static Plane planes[MAX_PLN];
-static const int MAX_BVH = MAX_OBJS*2+1;
-static BVHNode bvh_nodes[MAX_OBJS*2+1];
+static BVHNode bvh_nodes[MAX_BVH];
 static Object objects[MAX_OBJS];
 static Lambert lamberts[MAX_MATS];
+static Light lights[MAX_MATS];
 static Metal metals[MAX_MATS];
 static Glass glass[MAX_MATS];
 static SolidColor solid_colors[MAX_TEX];
@@ -682,6 +690,20 @@ static inline int make_lambert_solid(vec3 albedo) {
   return make_lambert(SOLID, make_solid_color(albedo));
 }
 
+static inline int make_light(int tex_type, int tex_id) {
+  if (light_count >= MAX_MATS) {
+    fprintf(stderr, "maximum number of lights reached (%i)", MAX_MATS);
+    return -1;
+  }
+  lights[light_count].tex.id = tex_id;
+  lights[light_count].tex.type = tex_type;
+  return light_count++;
+}
+
+static inline int make_light_solid(vec3 albedo) {
+  return make_light(SOLID, make_solid_color(albedo));
+}
+
 static inline int make_metal(int tex_type, int tex_id, float fuzz) {
   if (metal_count >= MAX_MATS) {
     fprintf(stderr, "maximum number of metals reached (%i)", MAX_MATS);
@@ -890,8 +912,8 @@ int main(void) {
   make_box(
     (vec3){-0.5, -0.5, 1.5},
     (vec3){0.5, 0.5, 2.5},
-    LAMBERT,
-    make_lambert_solid((vec3){1.0, 0.0, 1.0})
+    LIGHT,
+    make_light_solid((vec3){10.0, 10.0, 10.0})
   );
 
   make_bvh_nodes(0, obj_count);
@@ -911,7 +933,8 @@ int main(void) {
   GLuint mat_buf = make_unibuffer(program,
                     sizeof(Lambert)*MAX_MATS+
                       sizeof(Metal)*MAX_MATS+
-                      sizeof(Glass)*MAX_MATS,
+                      sizeof(Glass)*MAX_MATS+
+                      sizeof(Light)*MAX_MATS,
                     "MatBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, mat_buf);
   if (lambert_count > 0)
@@ -924,13 +947,17 @@ int main(void) {
                   sizeof(Lambert)*MAX_MATS + sizeof(Metal)*MAX_MATS,
                   sizeof(Glass)*glass_count,
                   glass);
+  if (light_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
+                  sizeof(Lambert)*MAX_MATS + sizeof(Metal)*MAX_MATS+sizeof(Glass)*MAX_MATS,
+                  sizeof(Light)*light_count,
+                  lights);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
   GLuint bvh_buf = make_unibuffer(program, sizeof(BVHNode)*MAX_BVH, "BvhBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, bvh_buf);
   if (bvh_count > 0)
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(BVHNode)*bvh_count, bvh_nodes);
-  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+ ; glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind mat");
 
   GLuint tex_buf = make_unibuffer(program,

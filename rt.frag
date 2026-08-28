@@ -72,6 +72,7 @@ uniform uint frame;
 #define LAMBERT 0
 #define METAL 1
 #define GLASS 2
+#define LIGHT 3
 
 #define SPHERE 0
 #define BVH 1
@@ -116,6 +117,10 @@ struct AABB {
 };
 
 struct Lambert {
+  TypeId tex;
+};
+
+struct Light {
   TypeId tex;
 };
 
@@ -201,6 +206,7 @@ layout (std140) uniform MatBlock {
   Lambert lamberts[MAX_MATS];
   Metal metals[MAX_MATS];
   Glass glass[MAX_MATS];
+  Light lights[MAX_MATS];
 };
 
 layout (std140) uniform TexBlock {
@@ -477,6 +483,18 @@ bool scat_glass(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   return true;
 }
 
+vec3 emit_light(Light self, vec2 uv, vec3 pt) {
+  return tex_sample(self.tex, uv, pt);
+}
+
+vec3 emit(Hit hit) {
+  if (hit.mat.type == LIGHT) {
+    return emit_light(lights[hit.mat.id], hit.uv, hit.p);
+  } else {
+    return vec3(0.0, 0.0, 0.0);
+  }
+}
+
 bool scat(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   if (hit.mat.type == LAMBERT) {
     return scat_lambert(r_in, hit, att, scat);
@@ -658,19 +676,27 @@ Ray get_ray() {
   return Ray(ray_orig, ray_dir, rand());
 }
 
+vec3 bg_color(Ray ray) {
+  // vec3 unit_dir = normalize(ray.dir);
+  // float a = 0.5*(unit_dir.y + 1.0);
+  // return (1.0-a)*vec3(1.0, 1.0, 1.0) + a*vec3(0.5, 0.7, 1.0);
+  return vec3(0.2, 0.2, 0.2);
+}
+
 bool ray_color1(Ray ray, out Ray ray2, out vec3 col) {
   Hit hit;
-  if (hit_world(ray, Range(0.001, pos_inf), hit)) {
-    if (scat(ray, hit, col, ray2)) {
-      return true;
-    }
-    col = vec3(0.0);
+  if (!hit_world(ray, Range(0.001, pos_inf), hit)) {
+    col = bg_color(ray);
     return false;
   }
-  vec3 unit_dir = normalize(ray.dir);
-  float a = 0.5*(unit_dir.y + 1.0);
-  col = (1.0-a)*vec3(1.0, 1.0, 1.0) + a*vec3(0.5, 0.7, 1.0);
-  return false;
+  vec3 em = emit(hit);
+  vec3 att;
+  if (!scat(ray, hit, att, ray2)) {
+    col = em;
+    return false;
+  }
+  col = att + em;
+  return true;
 }
 
 vec3 ray_color(Ray ray) {
