@@ -331,8 +331,20 @@ vec2 rand_unit_disk() {
   return vec2(r * cos(t), r * sin(t));
 }
 
+bool nearz(float x) {
+  return abs(x) < 1e-6;
+}
+
+bool nearz(vec2 v) {
+  return nearz(v.x) && nearz(v.y);
+}
+
 bool nearz(vec3 v) {
-  return abs(v.x) < 1e-6 && abs(v.y) < 1e-6 && abs(v.z) < 1e-6;
+  return nearz(v.xy) && nearz(v.z);
+}
+
+bool nearz(vec4 v) {
+  return nearz(v.xyz) && nearz(v.w);
 }
 
 struct Ray {
@@ -510,21 +522,21 @@ vec3 tex_sample(TypeId tex, vec2 uv, vec3 pt) {
 }
 
 #if LAMBERT_COUNT > 0
-bool scat_lambert(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
+bool scat_lambert(inout Ray ray, Hit hit, out vec3 att) {
   Lambert mat = lamberts[hit.mat.id];
   vec3 scat_dir = hit.n + rand_unit();
   if (nearz(scat_dir)) scat_dir = hit.n;
-  scat = Ray(hit.p, scat_dir, r_in.tm);
+  ray = Ray(hit.p, scat_dir, ray.tm);
   att = tex_sample(mat.tex, hit.uv, hit.p);
   return true;
 }
 #endif
 
 #if METAL_COUNT > 0
-bool scat_metal(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
+bool scat_metal(inout Ray ray, Hit hit, out vec3 att) {
   Metal mat = metals[hit.mat.id];
-  vec3 r = normalize(reflect(r_in.dir, hit.n)) + (mat.fuzz * rand_unit());
-  scat = Ray(hit.p, r, r_in.tm);
+  vec3 r = normalize(reflect(ray.dir, hit.n)) + (mat.fuzz * rand_unit());
+  ray = Ray(hit.p, r, ray.tm);
   att = tex_sample(mat.tex, hit.uv, hit.p);
   return (dot(r, hit.n) > 0.0);
 }
@@ -538,12 +550,12 @@ float reflectance(float cosine, float ri) {
   return r0 + (1.0-r0)*pow((1.0 - cosine), 5.0);
 }
 
-bool scat_glass(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
+bool scat_glass(inout Ray ray, Hit hit, out vec3 att) {
   Glass mat = glass[hit.mat.id];
   att = vec3(1.0, 1.0, 1.0);
   float ri = hit.front ? (1.0 / mat.index) : mat.index;
 
-  vec3 unit = normalize(r_in.dir);
+  vec3 unit = normalize(ray.dir);
   float cos_t = min(dot(-unit, hit.n), 1.0);
   float sin_t = sqrt(1.0 - cos_t*cos_t);
 
@@ -555,7 +567,7 @@ bool scat_glass(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
     dir = refract(unit, hit.n, ri);
   }
 
-  scat = Ray(hit.p, dir, r_in.tm);
+  ray = Ray(hit.p, dir, ray.tm);
   return true;
 }
 #endif
@@ -569,20 +581,20 @@ vec3 emit(Hit hit) {
   return vec3(0.0, 0.0, 0.0);
 }
 
-bool scat(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
+bool scat(inout Ray ray, Hit hit, out vec3 att) {
   #if LAMBERT_COUNT > 0
   if (hit.mat.type == LAMBERT) {
-    return scat_lambert(r_in, hit, att, scat);
+    return scat_lambert(ray, hit, att);
   } else
   #endif
   #if METAL_COUNT > 0
   if (hit.mat.type == METAL) {
-    return scat_metal(r_in, hit, att, scat);
+    return scat_metal(ray, hit, att);
   } else
   #endif
   #if GLASS_COUNT > 0
   if (hit.mat.type == GLASS) {
-    return scat_glass(r_in, hit, att, scat);
+    return scat_glass(ray, hit, att);
   } else
   #endif
   return false;
@@ -801,6 +813,7 @@ vec3 bg_color(Ray ray) {
   #elif BG_TYPE == GRADIENT
     vec3 unit_dir = normalize(ray.dir);
     float a = 0.5*(unit_dir.y + 1.0);
+    if (isnan(a) || isinf(a)) a = rand(); // HACK
     return mix(grad_bg.bottom, grad_bg.top, a);
   #elif BG_TYPE == SPHERE_MAP
     vec3 unit_dir = normalize(ray.dir);
@@ -813,40 +826,37 @@ vec3 bg_color(Ray ray) {
   #endif
 }
 
-bool ray_color1(Ray ray, out Ray ray2, out vec3 att, out vec3 em) {
+bool ray_color1(inout Ray ray, out vec3 att, out vec3 em) {
   Hit hit;
   if (!hit_world(ray, Range(0.001, pos_inf), hit)) {
     em = bg_color(ray);
     return false;
   }
   em = emit(hit);
-  if (!scat(ray, hit, att, ray2)) {
+  if (!scat(ray, hit, att)) {
     return false;
   }
   return true;
 }
 
 vec3 ray_color(Ray ray) {
-  Ray ray2 = ray;
   vec3 total_att = vec3(1.0);
   vec3 acc = vec3(0.0);
 
-  vec3 att, em;
   for (int i = 0; i < depth; i++) {
-    if (ray_color1(ray, ray2, att, em)) {
+    vec3 att, em;
+    if (ray_color1(ray, att, em)) {
       acc += em*total_att;
       total_att *= att;
-      ray = ray2;
     } else {
-      acc += em*total_att;
-      break;
+      return acc + em*total_att;
     }
   }
   return acc*total_att;
 }
 
 void main() {
-  seed = time + res.y * gl_FragCoord.x / res.x + gl_FragCoord.y / res.y;
+  seed = time + frame + res.y * gl_FragCoord.x / res.x + gl_FragCoord.y / res.y;
 
   scr = uv * res;
 
@@ -875,10 +885,10 @@ void main() {
 
   vec3 px_col = vec3(0.0, 0.0, 0.0);
   for (int s = 0; s < samples; s++) {
-    px_col = px_col + ray_color(get_ray());
+    px_col += ray_color(get_ray());
   }
   if (frame == 0) {
-    outColor = vec4(px_col / float(samples), 1.0);
+    outColor = vec4(px_col / float(samples), float(samples));
   } else {
     vec4 accum = texture(prev_frame, gl_FragCoord.xy / res.xy);
     float total_samples = accum.a + float(samples);

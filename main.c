@@ -603,23 +603,6 @@ static inline void make_box(vec3 a, vec3 b, int mat_type, int mat_id) {
   make_quad((vec3){min_x, min_y, min_z},  dx,  dz, mat_type, mat_id);  // bottom
 }
 
-static inline void make_solid_bg(vec3 col) {
-  vec3_copy(solid_bg.albedo, col);
-  bg_type = SOLID;
-}
-
-static inline void make_grad_bg(vec3 top, vec3 bottom) {
-  vec3_copy(grad_bg.top, top);
-  vec3_copy(grad_bg.bottom, bottom);
-  bg_type = GRADIENT;
-}
-
-static inline void make_sphere_map(int type, int id) {
-  sphere_map.type = type;
-  sphere_map.id = id;
-  bg_type = SPHERE_MAP;
-}
-
 #define JSON_OBJ_EACH(obj, key, val, block) if (obj->length > 0) { \
   JEntry __el = (obj)->start; \
   do { \
@@ -882,7 +865,7 @@ static int parse_moving_sphere(JObj obj) {
   json_vec3(center2, json_aref(obj, "center2"));
   int mat_type, mat_id;
   i2t(HGETR(materials_h, obj, material), &mat_type, &mat_id);
-  return make_moving_sphere(center1, center2, json_int(json_aref(obj, "radius")), mat_type, mat_id);
+  return make_moving_sphere(center1, center2, json_float(json_aref(obj, "radius")), mat_type, mat_id);
 }
 
 static int parse_quad(JObj obj) {
@@ -915,22 +898,19 @@ static void parse_box(JObj obj) {
 }
 
 static void parse_solid_bg(JObj bg) {
-  vec3 col;
-  json_vec3(col, json_aref(bg, "albedo"));
-  make_solid_bg(col);
+  json_vec3(solid_bg.albedo, json_aref(bg, "albedo"));
+  bg_type = SOLID;
 }
 
 static void parse_grad_bg(JObj bg) {
-  vec3 top, bottom;
-  json_vec3(top, json_aref(bg, "top"));
-  json_vec3(bottom, json_aref(bg, "bottom"));
-  make_grad_bg(top, bottom);
+  json_vec3(grad_bg.top, json_aref(bg, "top"));
+  json_vec3(grad_bg.bottom, json_aref(bg, "bottom"));
+  bg_type = GRADIENT;
 }
 
 static void parse_sphere_map(JObj bg) {
-  int type, id;
-  i2t(HGETR(textures_h, bg, texture), &type, &id);
-  make_sphere_map(type, id);
+  i2t(HGETR(textures_h, bg, texture), &sphere_map.type, &sphere_map.id);
+  bg_type = SPHERE_MAP;
 }
 
 static void parse_cube_map(JObj bg) {
@@ -1251,7 +1231,7 @@ int main(int argc, char **argv) {
   GLuint frame_loc = glGetUniformLocation(program, "frame");
 
   const int samples = 1;
-  const int depth = 5;
+  const int depth = 10;
 
   GLuint samples_loc = glGetUniformLocation(program, "samples");
   glUniform1i(samples_loc, samples);
@@ -1364,28 +1344,20 @@ int main(int argc, char **argv) {
     FREE(perlins);
   }
 
+  #define MAKE_BG_BUF(name, type) \
+    bg_buf = make_unibuffer(program, sizeof(type), "BgBlock"); \
+    glBindBuffer(GL_UNIFORM_BUFFER, bg_buf); \
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(type), &(name))
+
   GLuint bg_buf;
   switch (bg_type) {
-  case SOLID:
-    bg_buf = make_unibuffer(program, sizeof(SolidColor), "BgBlock");
-    glBindBuffer(GL_UNIFORM_BUFFER, bg_buf);
-    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(SolidColor), &solid_bg); break;
-    break;
-  case GRADIENT:
-    bg_buf = make_unibuffer(program, sizeof(Gradient), "BgBlock");
-    glBindBuffer(GL_UNIFORM_BUFFER, bg_buf);
-    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Gradient), &grad_bg); break;
-    break;
-  case SPHERE_MAP:
-    bg_buf = make_unibuffer(program, sizeof(TypeId), "BgBlock");
-    glBindBuffer(GL_UNIFORM_BUFFER, bg_buf);
-    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(TypeId), &sphere_map); break;
-    break;
-  case CUBE_MAP:
-    bg_buf = make_unibuffer(program, sizeof(CubeMap), "BgBlock");
-    glBindBuffer(GL_UNIFORM_BUFFER, bg_buf);
-    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(CubeMap), &cube_map); break;
-    break;
+  case SOLID: MAKE_BG_BUF(solid_bg, SolidColor); break;
+  case GRADIENT: MAKE_BG_BUF(grad_bg, Gradient); break;
+  case SPHERE_MAP: MAKE_BG_BUF(sphere_map, TypeId); break;
+  case CUBE_MAP: MAKE_BG_BUF(cube_map, CubeMap); break;
+  default:
+    fprintf(stderr, "unknown bg_type %i\n", bg_type);
+    return 1;
   }
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind bg");
@@ -1453,8 +1425,6 @@ int main(int argc, char **argv) {
     glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
 
     if (clear) {
-      glClearColor(0.0, 0.0, 0.0, 0.0);
-      glClear(GL_COLOR_BUFFER_BIT);
       int w, h;
       glfwGetFramebufferSize(window, &w, &h);
       glViewport(0, 0, w, h);
