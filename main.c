@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -84,11 +85,7 @@ static inline void i2ti(size_t i, TypeId *ti) {
   i2t(i, &ti->type, &ti->id);
 }
 
-#define FREE(ptr) if (ptr) { free(ptr); ptr = NULL; }
-
-#define MALLOC(ptr, type, count) \
-  if (count > 0) ptr = malloc(sizeof(type)*(count)); \
-  else FREE(ptr)
+#define MALLOC(ptr, type, count) if (count > 0) ptr = malloc(sizeof(type)*(count))
 
 typedef struct sphere {
   vec3 center;
@@ -418,7 +415,8 @@ static inline int aabb_longest(aabb const a) {
 }
 
 static inline void sphere_bbox(aabb r, const Sphere *sph) {
-  vec3 rvec = (vec3){sph->radius, sph->radius, sph->radius};
+  vec3 rvec;
+  vec3_set(rvec, sph->radius, sph->radius, sph->radius);
   aabb box0, box1;  vec3 a, b, center2;
   vec3_sub(a, sph->center, rvec);
   vec3_add(b, sph->center, rvec);
@@ -610,8 +608,7 @@ static inline void make_box(vec3 a, vec3 b, int mat_type, int mat_id) {
     JStr key = __el->name; \
     JAny val = __el->value; \
     { block } \
-    __el = __el->next; \
-  } while (__el); }
+  } while ((__el = __el->next)); }
 
 #define JSON_OBJ_EACH_CHK(obj, key, val, block) { \
   JOBj __obj = json_value_as_object(obj); \
@@ -625,8 +622,7 @@ static inline void make_box(vec3 a, vec3 b, int mat_type, int mat_id) {
       JAny it = __it->value; \
       { block } \
       i++; \
-      __it = __it->next; \
-    } while (__it); }
+    } while ((__it = __it->next)); }
 
 #define JSON_ARY_EACH_CHK(ary, it, i, block) { \
     JOBj __ary = json_value_as_array(ary); \
@@ -674,12 +670,15 @@ static inline bool json_vec3(vec3 r, JAny j) {
 
 static inline void json_count_types(JObj obj, int n, const char **types, int *counts) {
   JSON_OBJ_EACH(obj, _, val, {
-    JStr type_str = json_value_as_string(json_aref(json_value_as_object(val), "type"));
+    JObj o = json_value_as_object(val); if (!o) continue;
+    JAny type = json_aref(o, "type"); if (!type) continue;
+    JStr type_str = json_value_as_string(type); if (!type_str) continue;
     for (int i = 0; i < n; i++) {
       if (0 == strcmp(types[i], type_str->string)) {
         counts[i]++;
       }
     }
+    json_count_types(o, n, types, counts);
   });
 }
 
@@ -721,7 +720,7 @@ static int parse_noise(JObj json) {
 
 static int parse_image(JObj json) {
   JStr data_url = json_value_as_string(json_aref(json, "data"));
-  char *encoded = strchr(data_url->string, ',')+1;
+  const char *encoded = strchr(data_url->string, ',')+1;
   size_t len = 0;
   unsigned char *decoded = base64_decode(encoded, data_url->string_size - (encoded - data_url->string), &len);
   int width, height, channels;
@@ -1052,32 +1051,44 @@ int main(int argc, char **argv) {
   HNEW(textures_h, textures_json->length);
   HNEW(materials_h, materials_json->length);
 
-  MALLOC(perlins, Perlin, noises_json->length);
-  JSON_OBJ_EACH(noises_json, k, v, {
-    HPUT(noises_h, k, parse_noise(json_value_as_object(v)));
-  });
+  if (noises_json->length > 0) {
+    perlins = malloc(sizeof(Perlin)*noises_json->length);
+    JSON_OBJ_EACH(noises_json, k, v, {
+      HPUT(noises_h, k, parse_noise(json_value_as_object(v)));
+    });
+  }
 
-  MALLOC(images, ImageData, images_json->length);
-  JSON_OBJ_EACH(images_json, k, v, {
-    HPUT(images_h, k, parse_image(json_value_as_object(v)));
-  });
+  if (images_json->length) {
+    images = malloc(sizeof(ImageData)*images_json->length);
+    JSON_OBJ_EACH(images_json, k, v, {
+      HPUT(images_h, k, parse_image(json_value_as_object(v)));
+    });
+  }
 
   int tex_counts[] = {0,0,0,0};
   json_count_types(textures_json, 4, (const char*[]){"SolidColor", "Checker", "Image", "Noise"}, tex_counts);
-  MALLOC(solid_colors, SolidColor, tex_counts[0]);
-  MALLOC(checkers, Checker, tex_counts[1]);
-  MALLOC(image_tex, ImageTex, tex_counts[2]);
-  MALLOC(noises, Noise, tex_counts[3]);
+  if (tex_counts[0] > 0) solid_colors = malloc(sizeof(SolidColor)*tex_counts[0]);
+  if (tex_counts[1] > 0) checkers = malloc(sizeof(Checker)*tex_counts[1]);
+  if (tex_counts[2] > 0) image_tex = malloc(sizeof(ImageTex)*tex_counts[2]);
+  if (tex_counts[3] > 0) noises = malloc(sizeof(Noise)*tex_counts[3]);
   JSON_OBJ_EACH(textures_json, k, v, {
     HPUT(textures_h, k, parse_texture(json_value_as_object(v)));
   });
+  fprintf(stderr, "solid: %i (made %i)\n", tex_counts[0], solid_color_count);
+  fprintf(stderr, "checker: %i (made %i)\n", tex_counts[1], checker_count);
+  fprintf(stderr, "image: %i (made %i)\n", tex_counts[2], image_tex_count);
+  fprintf(stderr, "noise: %i (made %i)\n", tex_counts[3], noise_count);
+  assert(solid_color_count == tex_counts[0]);
+  assert(checker_count == tex_counts[1]);
+  assert(image_tex_count == tex_counts[2]);
+  assert(noise_count == tex_counts[3]);
 
   int mat_counts[] = {0,0,0,0};
   json_count_types(materials_json, 4, (const char*[]){"Lambertian", "Metal", "Dielectric", "DiffuseLight"}, mat_counts);
-  MALLOC(lamberts, Lambert, mat_counts[0]);
-  MALLOC(metals, Metal, mat_counts[1]);
-  MALLOC(glass, Glass, mat_counts[2]);
-  MALLOC(lights, Light, mat_counts[3]);
+  if (mat_counts[0] > 0) lamberts = malloc(sizeof(Lambert)*mat_counts[0]);
+  if (mat_counts[1] > 0) metals = malloc(sizeof(Metal)*mat_counts[1]);
+  if (mat_counts[2] > 0) glass = malloc(sizeof(Glass)*mat_counts[2]);
+  if (mat_counts[3] > 0) lights = malloc(sizeof(Light)*mat_counts[3]);
   JSON_OBJ_EACH(materials_json, k, v, {
     HPUT(materials_h, k, parse_material(json_value_as_object(v)));
   });
@@ -1089,9 +1100,9 @@ int main(int argc, char **argv) {
   const int num_spheres = obj_counts[0] + obj_counts[1];
   const int num_planes = obj_counts[2] + obj_counts[3] + 6*obj_counts[4];
   const int num_objects = num_spheres + num_planes;
-  MALLOC(objects, Object, num_objects);
-  MALLOC(spheres, Sphere, num_spheres);
-  MALLOC(planes, Plane, num_planes);
+  objects = malloc(sizeof(Object)*num_objects);
+  if (num_spheres > 0) spheres = malloc(sizeof(Sphere)*num_spheres);
+  if (num_planes > 0) planes = malloc(sizeof(Plane)*num_planes);
   JSON_OBJ_EACH(world_json, _, val, {
     JObj obj = json_value_as_object(val);
     JStr type_str = json_value_as_string(json_aref(obj, "type"));
@@ -1167,7 +1178,7 @@ int main(int argc, char **argv) {
   size_t extra_bytes = 500;
   char *frag_src = malloc(rt_bytes + extra_bytes);
   int frag_bytes = sprintf(frag_src,
-    "#version 410\n"
+    "#version 410 core\n"
     "precision highp float;\n"
     "#define SPHERE_COUNT %i\n"
     "#define PLANE_COUNT %i\n"
@@ -1266,14 +1277,16 @@ int main(int argc, char **argv) {
 
   GLuint obj_buf = make_unibuffer(program, sizeof(Sphere)*sphere_count+sizeof(Plane)*plane_count, "ObjBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, obj_buf);
-  if (sphere_count > 0)
+  if (sphere_count > 0) {
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
-  if (plane_count> 0)
+    free(spheres);
+  }
+  if (plane_count> 0) {
     glBufferSubData(GL_UNIFORM_BUFFER, sizeof(Sphere)*sphere_count, sizeof(Plane)*plane_count, planes);
+    free(planes);
+  }
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind obj");
-  FREE(spheres);
-  FREE(planes);
 
   GLuint mat_buf = make_unibuffer(program,
                     sizeof(Lambert)*lambert_count+
@@ -1282,25 +1295,32 @@ int main(int argc, char **argv) {
                       sizeof(Light)*light_count,
                     "MatBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, mat_buf);
-  if (lambert_count > 0)
+  if (lambert_count > 0) {
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Lambert)*lambert_count, lamberts);
-  if (metal_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(Lambert)*lambert_count,
-                  sizeof(Metal)*metal_count,
-                  metals);
-  if (glass_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(Lambert)*lambert_count + sizeof(Metal)*metal_count,
-                  sizeof(Glass)*glass_count,
-                  glass);
-  if (light_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(Lambert)*lambert_count + sizeof(Metal)*metal_count+sizeof(Glass)*glass_count,
-                  sizeof(Light)*light_count,
-                  lights);
+    free(lamberts);
+  }
+  if (metal_count > 0) {
+    glBufferSubData(GL_UNIFORM_BUFFER,
+      sizeof(Lambert)*lambert_count,
+      sizeof(Metal)*metal_count,
+      metals);
+    free(metals);
+  }
+  if (glass_count > 0) {
+    glBufferSubData(GL_UNIFORM_BUFFER,
+      sizeof(Lambert)*lambert_count + sizeof(Metal)*metal_count,
+      sizeof(Glass)*glass_count,
+      glass);
+    free(glass);
+  }
+  if (light_count > 0) {
+    glBufferSubData(GL_UNIFORM_BUFFER,
+      sizeof(Lambert)*lambert_count + sizeof(Metal)*metal_count+sizeof(Glass)*glass_count,
+      sizeof(Light)*light_count,
+      lights);
+    free(lights);
+  }
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
-  FREE(lamberts);
-  FREE(metals);
-  FREE(glass);
-  FREE(lights);
 
   GLuint bvh_buf = make_unibuffer(program, sizeof(BVHNode)*bvh_count, "BvhBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, bvh_buf);
@@ -1308,8 +1328,8 @@ int main(int argc, char **argv) {
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(BVHNode)*bvh_count, bvh_nodes);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind mat");
-  FREE(bvh_nodes);
-  FREE(objects);
+  free(bvh_nodes);
+  free(objects);
 
   GLuint tex_buf = make_unibuffer(program,
                     sizeof(SolidColor)*solid_color_count+
@@ -1318,23 +1338,30 @@ int main(int argc, char **argv) {
                       sizeof(Noise)*noise_count,
                     "TexBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, tex_buf);
-  if (solid_color_count > 0)
+  if (solid_color_count > 0) {
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(SolidColor)*solid_color_count, solid_colors);
-  if (checker_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(SolidColor)*solid_color_count,
-                  sizeof(Checker)*checker_count, checkers);
-  if (image_tex_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(SolidColor)*solid_color_count + sizeof(Checker)*checker_count,
-                  sizeof(ImageTex)*image_tex_count, image_tex);
-  if (noise_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(SolidColor)*solid_color_count + sizeof(Checker)*checker_count + sizeof(ImageTex)*image_tex_count,
-                  sizeof(Noise)*noise_count, noises);
+    free(solid_colors);
+  }
+  if (checker_count > 0) {
+    glBufferSubData(GL_UNIFORM_BUFFER,
+      sizeof(SolidColor)*solid_color_count,
+      sizeof(Checker)*checker_count, checkers);
+    free(checkers);
+  }
+  if (image_tex_count > 0) {
+    glBufferSubData(GL_UNIFORM_BUFFER,
+      sizeof(SolidColor)*solid_color_count + sizeof(Checker)*checker_count,
+      sizeof(ImageTex)*image_tex_count, image_tex);
+    free(image_tex);
+  }
+  if (noise_count > 0) {
+    glBufferSubData(GL_UNIFORM_BUFFER,
+      sizeof(SolidColor)*solid_color_count + sizeof(Checker)*checker_count + sizeof(ImageTex)*image_tex_count,
+      sizeof(Noise)*noise_count, noises);
+    free(noises);
+  }
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind tex");
-  FREE(solid_colors);
-  FREE(checkers);
-  FREE(image_tex);
-  FREE(noises);
 
   if (perlin_count > 0) {
     GLuint perl_buf = make_unibuffer(program, sizeof(Perlin)*perlin_count, "PerlinBlock");
@@ -1343,7 +1370,7 @@ int main(int argc, char **argv) {
       glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Perlin)*perlin_count, perlins);
     glBindBuffer(GL_UNIFORM_BUFFER, 0);
     glErrorCheck("bind perlin");
-    FREE(perlins);
+    free(perlins);
   }
 
   #define MAKE_BG_BUF(name, type) \
@@ -1379,9 +1406,9 @@ int main(int argc, char **argv) {
       free(images[i].data);
       glErrorCheck("tex sub data 3d");
     }
+    free(images);
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
     glErrorCheck("setup images");
-    FREE(images);
 
     GLuint images_loc = glGetUniformLocation(program, "images");
     glUniform1i(images_loc, 1);

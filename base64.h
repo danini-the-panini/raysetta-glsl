@@ -32,7 +32,7 @@ unsigned char *base64_decode(const char *data,
   if (data[input_length - 1] == '=') (*output_length)--;
   if (data[input_length - 2] == '=') (*output_length)--;
 
-  unsigned char *decoded_data = malloc(*output_length);
+  unsigned char *decoded_data = (unsigned char*)malloc(*output_length);
   if (decoded_data == NULL) return NULL;
 
   for (size_t i = 0, j = 0; i < input_length;) {

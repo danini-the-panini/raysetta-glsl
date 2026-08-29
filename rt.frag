@@ -290,7 +290,7 @@ uniform int bvh_count;
 in vec2 uv;
 layout (location = 0) out vec4 outColor;
 
-float seed;
+float seed = 0.0;
 float rand() { return fract(sin(seed++)*43758.5453123); }
 
 float rand(float min, float max) {
@@ -364,12 +364,6 @@ float length(Range self) {
 
 bool surrounds(Range self, float x) {
   return self.min < x && x < self.max;
-}
-
-float clamp(Range self, float x) {
-  if (x < self.min) return self.min;
-  if (x > self.max) return self.max;
-  return x;
 }
 
 vec3 ray_at(Ray self, float t) {
