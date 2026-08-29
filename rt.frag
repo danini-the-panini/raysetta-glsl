@@ -61,6 +61,7 @@ uniform int samples;
 uniform int depth;
 
 uniform sampler2DArray images;
+uniform sampler2D prev_frame;
 
 uniform float time;
 uniform uint utime;
@@ -795,10 +796,15 @@ void main() {
   df_u = cu * df_r;
   df_v = cv * df_r;
 
-  float sample_scale = 1.0 / float(samples);
   vec3 px_col = vec3(0.0, 0.0, 0.0);
   for (int s = 0; s < samples; s++) {
     px_col = px_col + ray_color(get_ray());
   }
-  outColor = vec4(px_col * sample_scale, frame == 0 ? 1.0 : 1.0/frame);
+  if (frame == 0) {
+    outColor = vec4(px_col / float(samples), 1.0);
+  } else {
+    vec4 accum = texture(prev_frame, gl_FragCoord.xy / res.xy);
+    float total_samples = accum.a + float(samples);
+    outColor = vec4((accum.rgb * accum.a + px_col)/total_samples, total_samples);
+  }
 }

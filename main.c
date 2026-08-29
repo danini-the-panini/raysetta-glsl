@@ -310,18 +310,25 @@ static int load_image(const char *filename) {
 void print_shader_info_log(GLuint shader) {
   GLint len = 0;
   glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &len);
-  if (len <= 0) return;
+  if (len <= 0) {
+    fprintf(stderr, "no logs for shader %i\n", shader);
+    return;
+  }
 
   GLchar *log = malloc(len);
   glGetShaderInfoLog(shader, len, &len, log);
 
   fprintf(stderr, "%s\n", log);
+  free(log);
 }
 
 void print_program_info_log(GLuint program) {
   GLint len = 0;
   glGetProgramiv(program, GL_INFO_LOG_LENGTH, &len);
-  if (len <= 0) return;
+  if (len <= 0) {
+    fprintf(stderr, "no logs for program %i\n", program);
+    return;
+  }
 
   GLchar *log = malloc(len);
   glGetProgramInfoLog(program, len, &len, log);
@@ -1172,8 +1179,56 @@ static void parse_cube_map(JObj bg) {
   bg_type = CUBEMAP;
 }
 
+static GLuint render_tex = 0;
+static GLuint fb = 0;
+
+void make_framebuffer(int w, int h) {
+  glGenFramebuffers(1, &fb);
+  glErrorCheck("gen fb");
+  glBindFramebuffer(GL_FRAMEBUFFER, fb);
+  glErrorCheck("bind fb");
+
+  glGenTextures(1, &render_tex);
+  glErrorCheck("gen render tex");
+
+  glBindTexture(GL_TEXTURE_2D, render_tex);
+  glErrorCheck("bind render tex");
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, NULL);
+  glErrorCheck("render tex 2d");
+
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glErrorCheck("render tex param");
+  glBindTexture(GL_TEXTURE_2D, 0);
+  glErrorCheck("render tex unbind");
+
+  glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, render_tex, 0);
+  glErrorCheck("fb tex");
+  glDrawBuffer(GL_COLOR_ATTACHMENT0);
+  glErrorCheck("fb drawbuf");
+
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+    fprintf(stderr, "framebuffer incomplete!\n");
+  }
+
+  glActiveTexture(GL_TEXTURE1);
+  glErrorCheck("render active tex");
+  glBindTexture(GL_TEXTURE_2D, render_tex);
+  glErrorCheck("bind render tex 2");
+}
+
+void remake_framebuffer(int w, int h) {
+  glDeleteFramebuffers(1, &fb);
+  fb = 0;
+  glDeleteTextures(1, &render_tex);
+  render_tex = 0;
+  make_framebuffer(w, h);
+}
+
+static GLuint res_loc;
 void on_resize(GLFWwindow *win, int w, int h) {
   clear = true;
+  remake_framebuffer(w, h);
 }
 
 void on_mouse_move(GLFWwindow *win, double x, double y) {
@@ -1235,9 +1290,9 @@ int main(int argc, char **argv) {
   int version = gladLoadGL(glfwGetProcAddress);
   printf("GL %d.%d\n", GLAD_VERSION_MAJOR(version), GLAD_VERSION_MINOR(version));
 
-  glEnable(GL_FRAMEBUFFER_SRGB);
-  glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  // glEnable(GL_FRAMEBUFFER_SRGB);
+  // glEnable(GL_BLEND);
+  // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
   GLuint vao;
   glGenVertexArrays(1, &vao);
@@ -1252,11 +1307,32 @@ int main(int argc, char **argv) {
   glLinkProgram(program);
 
   if (!check_program(program)) {
+    fprintf(stderr, "failed to link rt program\n");
     print_shader_info_log(vert);
     print_shader_info_log(frag);
     print_program_info_log(program);
     return 1;
   }
+
+  GLuint screen_frag;
+  if (!load_shader("screen.frag", GL_FRAGMENT_SHADER, &screen_frag)) return 1;
+
+  const GLuint screen_program = glCreateProgram();
+  glAttachShader(screen_program, vert);
+  glAttachShader(screen_program, screen_frag);
+  glLinkProgram(screen_program);
+
+  if (!check_program(screen_program)) {
+    fprintf(stderr, "failed to link screen program\n");
+    print_shader_info_log(vert);
+    print_shader_info_log(screen_frag);
+    print_program_info_log(screen_program);
+    return 1;
+  }
+
+  glDeleteShader(vert);
+  glDeleteShader(frag);
+  glDeleteShader(screen_frag);
 
   glUseProgram(program);
   glErrorCheck("shader");
@@ -1272,7 +1348,7 @@ int main(int argc, char **argv) {
   GLuint depth_loc = glGetUniformLocation(program, "depth");
   glUniform1i(depth_loc, depth);
 
-  GLuint res_loc = glGetUniformLocation(program, "res");
+  res_loc = glGetUniformLocation(program, "res");
   glUniform2f(res_loc, WIDTH, HEIGHT);
 
   vec3_set(cam.eye, 0.0, 0.0, 0.0);
@@ -1487,6 +1563,15 @@ int main(int argc, char **argv) {
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D_ARRAY, images_tex);
 
+  make_framebuffer(WIDTH, HEIGHT);
+
+  GLuint prev_frame_loc = glGetUniformLocation(program, "prev_frame");
+  glUniform1i(prev_frame_loc, 1);
+
+  glUseProgram(screen_program);
+  GLuint frame_tex_loc = glGetUniformLocation(screen_program, "frame");
+  glUniform1i(frame_tex_loc, 1);
+  
   glfwGetCursorPos(window, &last_mouse[0], &last_mouse[1]);
 
   glfwSetFramebufferSizeCallback(window, on_resize);
@@ -1499,6 +1584,9 @@ int main(int argc, char **argv) {
   float last_time = glfwGetTime();
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
+
+    glUseProgram(program);
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
 
     float t = glfwGetTime();
     glUniform1f(time_loc, t);
@@ -1513,7 +1601,7 @@ int main(int argc, char **argv) {
     glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
 
     if (clear) {
-      glClearColor(0.7f, 0.9f, 0.1f, 1.0f);
+      glClearColor(0.0, 0.0, 0.0, 0.0);
       glClear(GL_COLOR_BUFFER_BIT);
       int w, h;
       glfwGetFramebufferSize(window, &w, &h);
@@ -1529,6 +1617,10 @@ int main(int argc, char **argv) {
     frame++;
 
     glBindVertexArray(vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    glUseProgram(screen_program);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     glfwSwapBuffers(window);
