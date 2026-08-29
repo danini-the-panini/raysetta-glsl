@@ -30,6 +30,7 @@ typedef struct json_number_s *JNum;
 
 #define WIDTH 400
 #define HEIGHT 200
+#define TARGET_FPS 60
 
 #define LAMBERT 0
 #define METAL 1
@@ -990,6 +991,8 @@ void on_scroll(GLFWwindow *win, double dx, double dy) {
   clear = true;
 }
 
+static int samples = 2;
+
 int main(int argc, char **argv) {
   if (argc != 2) {
     fprintf(stderr, "must pass exactly one argument, path to scene.json\n");
@@ -1230,7 +1233,6 @@ int main(int argc, char **argv) {
   GLuint time_loc = glGetUniformLocation(program, "time");
   GLuint frame_loc = glGetUniformLocation(program, "frame");
 
-  const int samples = 1;
   const int depth = 10;
 
   GLuint samples_loc = glGetUniformLocation(program, "samples");
@@ -1405,21 +1407,33 @@ int main(int argc, char **argv) {
   glErrorCheck("before draw");
 
   int nframes = 0;
-  float last_time = glfwGetTime();
+  double last_time = glfwGetTime(); 
+  double last_fps = last_time;
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
 
     glUseProgram(program);
     glBindFramebuffer(GL_FRAMEBUFFER, fb);
 
-    float t = glfwGetTime();
-    glUniform1f(time_loc, t);
+    double t = glfwGetTime();
+    glUniform1f(time_loc, (float)t);
+    double delta = t - last_time;
+    last_time = t;
 
     nframes++;
-    if (t - last_time > 1.0) {
-      printf("FPS %i\n", nframes);
+    if (t - last_fps > 1.0) {
+      printf("FPS %i (%i samples)\n", nframes, samples);
+      double delta_factor = (float)nframes / (float)TARGET_FPS;
+      int target_samples = (int)(round(samples * delta_factor));
+      if (target_samples < 1) target_samples = 1;
+      if (samples != target_samples) {
+        samples = target_samples;
+        printf("adjusting samples to %i\n-----\n", samples);
+        glUniform1i(samples_loc, samples);
+      }
+
       nframes = 0;
-      last_time += 1.0;
+      last_fps += 1.0;
     }
 
     glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
