@@ -48,19 +48,9 @@ typedef struct json_number_s *JNum;
 #define IMAGE 2
 #define NOISE 3
 
-#define MAX_SPH 500
-#define MAX_PLN 100
-#define MAX_MATS MAX_OBJS
-#define MAX_TEX MAX_MATS
-#define MAX_IMG 64
-#define MAX_PERLIN 8
-
-#define GRAD 1
-#define CUBEMAP 2
-#define SPHMAP 3
-
-static const int MAX_OBJS = MAX_SPH+MAX_PLN;
-static const int MAX_BVH = MAX_OBJS*2+1;
+#define GRADIENT 1
+#define CUBE_MAP 2
+#define SPHERE_MAP 3
 
 typedef vec4 aabb[2];
 
@@ -92,6 +82,12 @@ static inline void i2t(size_t i, int *type, int *id) {
 static inline void i2ti(size_t i, TypeId *ti) {
   i2t(i, &ti->type, &ti->id);
 }
+
+#define FREE(ptr) if (ptr) { free(ptr); ptr = NULL; }
+
+#define MALLOC(ptr, type, count) \
+  if (count > 0) ptr = malloc(sizeof(type)*(count)); \
+  else FREE(ptr)
 
 typedef struct sphere {
   vec3 center;
@@ -187,27 +183,12 @@ static inline void glErrorCheck(const char *msg) {
   if (err == GL_NO_ERROR) return;
 
   switch (err) {
-  case GL_INVALID_ENUM: printf("%s: GL_INVALID_ENUM\n", msg); break;
-  case GL_INVALID_VALUE: printf("%s: GL_INVALID_VALUE\n", msg); break;
-  case GL_INVALID_OPERATION: printf("%s: GL_INVALID_OPERATION\n", msg); break;
-  case GL_INVALID_FRAMEBUFFER_OPERATION: printf("%s: GL_INVALID_FRAMEBUFFER_OPERATION\n", msg); break;
-  case GL_OUT_OF_MEMORY: printf("%s: GL_OUT_OF_MEMORY\n", msg); break;
-  default: printf("Unknown error %i\n", err); break;
-  }
-}
-
-static inline void shuffle_perm(ivec4 *array, size_t n) {
-  if (n > 1)  {
-    size_t i, j, k;
-    int t;
-    for (i = 0; i < n - 1; i++)  {
-      for (k = 0; k < 4; k++) {
-        j = i + rand() / (RAND_MAX / (n - i) + 1);
-        t = array[j][k];
-        array[j][k] = array[i][k];
-        array[i][k] = t;
-      }
-    }
+  case GL_INVALID_ENUM: fprintf(stderr, "%s: GL_INVALID_ENUM\n", msg); break;
+  case GL_INVALID_VALUE: fprintf(stderr, "%s: GL_INVALID_VALUE\n", msg); break;
+  case GL_INVALID_OPERATION: fprintf(stderr, "%s: GL_INVALID_OPERATION\n", msg); break;
+  case GL_INVALID_FRAMEBUFFER_OPERATION: fprintf(stderr, "%s: GL_INVALID_FRAMEBUFFER_OPERATION\n", msg); break;
+  case GL_OUT_OF_MEMORY: fprintf(stderr, "%s: GL_OUT_OF_MEMORY\n", msg); break;
+  default: fprintf(stderr, "Unknown error %i\n", err); break;
   }
 }
 
@@ -222,12 +203,6 @@ static inline unsigned int next_po2(unsigned int v) {
 }
 
 static inline void vec3_set(vec3 v, float x, float y, float z) {
-  v[0] = x;
-  v[1] = y;
-  v[2] = z;
-}
-
-static inline void ivec3_set(ivec3 v, int x, int y, int z) {
   v[0] = x;
   v[1] = y;
   v[2] = z;
@@ -257,25 +232,30 @@ static char *load_file(const char *filename, size_t *len) {
   return str;
 }
 
-static char *load_file_cstr(const char *filename) {
+static char *load_file_cstr(const char *filename, size_t *len) {
   size_t length;
   FILE *file = open_file(filename, &length);
   GLchar* str = malloc(length+1);
   fread(str, 1, length, file);
   str[length] = '\0';
+  if (len) *len = length;
   fclose(file);
   return str;
 }
 
-static bool load_shader(const char *filename, GLenum type, GLuint *ret) {
-  GLchar *str = load_file_cstr(filename);
-  if (!str) return false;
-
+static GLuint load_shader(const char *str, GLenum type) {
   const GLuint shader = glCreateShader(type);
   glShaderSource(shader, 1, (const GLchar**)&str, NULL);
   glCompileShader(shader);
+  return shader;
+}
+
+static bool load_shader_from_file(const char *filename, GLenum type, GLuint *ret) {
+  GLchar *str = load_file_cstr(filename, NULL);
+  if (!str) return false;
+
+  *ret = load_shader(str, type);
   free(str);
-  *ret = shader;
   return true;
 }
 
@@ -284,28 +264,9 @@ typedef struct image_data {
   int width;
   int height;
 } ImageData;
-static ImageData images[MAX_IMG];
 static int image_count = 0;
 static int max_width = 1;
 static int max_height = 1;
-static int load_image(const char *filename) {
-  if (image_count >= MAX_IMG) {
-    fprintf(stderr, "maximum number of images reached (%i)\n", MAX_IMG);
-    return -1;
-  }
-  int width, height, channels;
-  float *data = stbi_loadf(filename, &width, &height, &channels, 3);
-  if (!data) {
-    fprintf(stderr, "failed to load image %s\n", filename);
-    return -1;
-  }
-  if (width > max_width) max_width = width;
-  if (height > max_height) max_height = height;
-  images[image_count].data = data;
-  images[image_count].width = width;
-  images[image_count].height = height;
-  return image_count++;
-}
 
 void print_shader_info_log(GLuint shader) {
   GLint len = 0;
@@ -344,28 +305,6 @@ bool check_program(GLuint program) {
   return false;
 }
 
-static inline float randf() {
-  return (float)rand() / (float)RAND_MAX;
-}
-
-static inline double randd() {
-  return (double)rand() / (double)RAND_MAX;
-}
-
-static inline float randf_r(float min, float max) {
-  return min + (max-min)*randf();
-}
-
-static inline int randi_r(int min, int max) {
-  return (int)(randf_r(min, max+1));
-}
-
-static inline void vec3_rand(vec3 r) {
-  r[0] = randf();
-  r[1] = randf();
-  r[2] = randf();
-}
-
 static int unibuf_count = 0;
 static inline GLuint make_unibuffer(GLuint program, GLsizei size, const char *name) {
   GLuint loc = glGetUniformBlockIndex(program, name);
@@ -400,21 +339,23 @@ static int glass_count = 0;
 static int solid_color_count = 0;
 static int checker_count = 0;
 static int image_tex_count = 0;
-static int perlin_count;
-static int noise_count;
-static Sphere spheres[MAX_SPH];
-static Plane planes[MAX_PLN];
-static BVHNode bvh_nodes[MAX_BVH];
-static Object objects[MAX_OBJS];
-static Lambert lamberts[MAX_MATS];
-static Light lights[MAX_MATS];
-static Metal metals[MAX_MATS];
-static Glass glass[MAX_MATS];
-static SolidColor solid_colors[MAX_TEX];
-static Checker checkers[MAX_TEX];
-static ImageTex image_tex[MAX_IMG];
-static Perlin perlins[MAX_PERLIN];
-static Noise noises[MAX_TEX];
+static int perlin_count = 0;
+static int noise_count = 0;
+
+static Sphere *spheres = NULL;
+static Plane *planes = NULL;
+static BVHNode *bvh_nodes = NULL;
+static Object *objects = NULL;
+static Lambert *lamberts = NULL;
+static Light *lights = NULL;
+static Metal *metals = NULL;
+static Glass *glass = NULL;
+static SolidColor *solid_colors = NULL;
+static Checker *checkers = NULL;
+static ImageTex *image_tex = NULL;
+static Perlin *perlins = NULL;
+static Noise *noises = NULL;
+static ImageData *images = NULL;
 
 static SolidColor solid_bg;
 static Gradient grad_bg;
@@ -529,10 +470,6 @@ static inline int make_bvh_node(int left_type, int left_id, int right_type, int 
     fprintf(stderr, "invalid obj id (%i)\n'", left_id < 0 ? left_id : right_id);
     return -1;
   }
-  if (bvh_count >= MAX_BVH) {
-    fprintf(stderr, "maximum number of bvh nodes reached (%i)\n", MAX_BVH);
-    return -1;
-  }
 
   bvh_nodes[bvh_count].left_type = left_type;
   bvh_nodes[bvh_count].left_id = left_id;
@@ -594,14 +531,6 @@ static inline int make_moving_sphere(vec3 center1, vec3 center2, float radius, i
     fprintf(stderr, "invalid material id (%i)\n'", mat_id);
     return -1;
   }
-  if (sphere_count >= MAX_SPH) {
-    fprintf(stderr, "maximum number of spheres reached (%i)\n", MAX_SPH);
-    return -1;
-  }
-  if (obj_count >= MAX_OBJS) {
-    fprintf(stderr, "maximum number of objects reached (%i)\n", MAX_OBJS);
-    return -1;
-  }
   vec3_copy(spheres[sphere_count].center, center1);
   vec3_sub(spheres[sphere_count].vec, center2, center1);
   spheres[sphere_count].radius = radius;
@@ -620,14 +549,6 @@ static inline int make_sphere(vec3 center, float radius, int mat_type, int mat_i
 static inline int make_plane(vec3 q, vec3 u, vec3 v, int plane_type, int mat_type, int mat_id) {
   if (mat_id < 0) {
     fprintf(stderr, "invalid material id (%i)\n'", mat_id);
-    return -1;
-  }
-  if (plane_count >= MAX_PLN) {
-    fprintf(stderr, "maximum number of planes reached (%i)\n", MAX_PLN);
-    return -1;
-  }
-  if (obj_count >= MAX_OBJS) {
-    fprintf(stderr, "maximum number of objects reached (%i)\n", MAX_OBJS);
     return -1;
   }
   vec3_copy(planes[plane_count].q, q);
@@ -682,51 +603,6 @@ static inline void make_box(vec3 a, vec3 b, int mat_type, int mat_id) {
   make_quad((vec3){min_x, min_y, min_z},  dx,  dz, mat_type, mat_id);  // bottom
 }
 
-static inline int make_solid_color(vec3 albedo) {
-  if (solid_color_count > MAX_TEX) {
-    fprintf(stderr, "maximum number of solid colors reached (%i)\n", MAX_TEX);
-    return -1;
-  }
-  vec3_copy(solid_colors[solid_color_count].albedo, albedo);
-  return solid_color_count++;
-}
-
-static inline int make_checker(float scale, int even_type, int even_id, int odd_type, int odd_id) {
-  if (checker_count > MAX_TEX) {
-    fprintf(stderr, "maximum number of checker textures reached (%i)\n", MAX_TEX);
-    return -1;
-  }
-  checkers[checker_count].inv_scale = 1.0 / scale;
-  checkers[checker_count].even.type = even_type;
-  checkers[checker_count].even.id = even_id;
-  checkers[checker_count].odd.type = odd_type;
-  checkers[checker_count].odd.id = odd_id;
-  return checker_count++;
-}
-
-static inline int make_solid_checker(float scale, vec3 even, vec3 odd) {
-  return make_checker(scale, SOLID, make_solid_color(even), SOLID, make_solid_color(odd));
-}
-
-static inline int make_image_tex(int id) {
-  if (image_tex_count > MAX_IMG) {
-    fprintf(stderr, "maximum number of image textures reached (%i)\n", MAX_IMG);
-    return -1;
-  }
-  if (id < 0) {
-    fprintf(stderr, "invalid image id %i\n", id);
-    return -1;
-  }
-  image_tex[image_tex_count].id = id;
-  image_tex[image_tex_count].width = images[id].width;
-  image_tex[image_tex_count].height = images[id].height;
-  return image_tex_count++;
-}
-
-static inline int make_image_tex_from_file(const char *filename) {
-  return make_image_tex(load_image(filename));
-}
-
 static inline void make_solid_bg(vec3 col) {
   vec3_copy(solid_bg.albedo, col);
   bg_type = SOLID;
@@ -735,135 +611,13 @@ static inline void make_solid_bg(vec3 col) {
 static inline void make_grad_bg(vec3 top, vec3 bottom) {
   vec3_copy(grad_bg.top, top);
   vec3_copy(grad_bg.bottom, bottom);
-  bg_type = GRAD;
+  bg_type = GRADIENT;
 }
 
 static inline void make_sphere_map(int type, int id) {
   sphere_map.type = type;
   sphere_map.id = id;
-  bg_type = SPHMAP;
-}
-
-static inline void make_sphere_map_from_file(const char *filename) {
-  make_sphere_map(IMAGE, make_image_tex_from_file(filename));
-}
-
-static inline void make_cube_map(
-  int type0, int id0,
-  int type1, int id1,
-  int type2, int id2,
-  int type3, int id3,
-  int type4, int id4,
-  int type5, int id5
-) {
-  cube_map.tex[0].type = type0; cube_map.tex[0].id = id0;
-  cube_map.tex[1].type = type1; cube_map.tex[1].id = id1;
-  cube_map.tex[2].type = type2; cube_map.tex[2].id = id2;
-  cube_map.tex[3].type = type3; cube_map.tex[3].id = id3;
-  cube_map.tex[4].type = type4; cube_map.tex[4].id = id4;
-  cube_map.tex[5].type = type5; cube_map.tex[5].id = id5;
-  bg_type = CUBEMAP;
-}
-
-static inline void make_cube_map_from_files(
-  const char *f0,
-  const char *f1,
-  const char *f2,
-  const char *f3,
-  const char *f4,
-  const char *f5
-) {
-  make_cube_map(
-    IMAGE, make_image_tex_from_file(f0),
-    IMAGE, make_image_tex_from_file(f1),
-    IMAGE, make_image_tex_from_file(f2),
-    IMAGE, make_image_tex_from_file(f3),
-    IMAGE, make_image_tex_from_file(f4),
-    IMAGE, make_image_tex_from_file(f5)
-  );
-}
-
-static inline int make_perlin() {
-  if (perlin_count > MAX_PERLIN) {
-    fprintf(stderr, "maximum number of perlin noises reached (%i)", MAX_PERLIN);
-    return -1;
-  }
-  vec3 tmp;
-  for (int i = 0; i < POINT_COUNT; i++) {
-    vec3_set(tmp, randf_r(-1.0, 1.0), randf_r(-1.0, 1.0), randf_r(-1.0, 1.0));
-    vec3_norm(perlins[perlin_count].randvec[i], tmp);
-    ivec3_set(perlins[perlin_count].perm[i], i, i, i);
-  }
-  shuffle_perm(perlins[perlin_count].perm, POINT_COUNT);
-  return perlin_count++;
-}
-
-static inline int make_noise(int id, float scale, int depth, int axis) {
-  if (noise_count > MAX_TEX) {
-    fprintf(stderr, "maximum number of noise textures reached (%i)", MAX_PERLIN);
-    return -1;
-  }
-  noises[noise_count].id = id;
-  noises[noise_count].scale = scale;
-  noises[noise_count].depth = depth;
-  noises[noise_count].axis = axis;
-  return noise_count++;
-}
-
-static inline int make_perlin_noise(float scale, int depth, int axis) {
-  return make_noise(make_perlin(), scale, depth, axis);
-}
-
-static inline int make_lambert(int tex_type, int tex_id) {
-  if (lambert_count >= MAX_MATS) {
-    fprintf(stderr, "maximum number of lamberts reached (%i)", MAX_MATS);
-    return -1;
-  }
-  lamberts[lambert_count].tex.id = tex_id;
-  lamberts[lambert_count].tex.type = tex_type;
-  return lambert_count++;
-}
-
-static inline int make_lambert_solid(vec3 albedo) {
-  return make_lambert(SOLID, make_solid_color(albedo));
-}
-
-static inline int make_light(int tex_type, int tex_id) {
-  if (light_count >= MAX_MATS) {
-    fprintf(stderr, "maximum number of lights reached (%i)", MAX_MATS);
-    return -1;
-  }
-  lights[light_count].tex.id = tex_id;
-  lights[light_count].tex.type = tex_type;
-  return light_count++;
-}
-
-static inline int make_light_solid(vec3 albedo) {
-  return make_light(SOLID, make_solid_color(albedo));
-}
-
-static inline int make_metal(int tex_type, int tex_id, float fuzz) {
-  if (metal_count >= MAX_MATS) {
-    fprintf(stderr, "maximum number of metals reached (%i)", MAX_MATS);
-    return -1;
-  }
-  metals[metal_count].tex.id = tex_id;
-  metals[metal_count].tex.type = tex_type;
-  metals[metal_count].fuzz = fuzz;
-  return metal_count++;
-}
-
-static inline int make_metal_solid(vec3 albedo, float fuzz) {
-  return make_metal(SOLID, make_solid_color(albedo), fuzz);
-}
-
-static inline int make_glass(float index) {
-  if (glass_count >= MAX_MATS) {
-    fprintf(stderr, "maximum number of glasss reached (%i)", MAX_MATS);
-    return -1;
-  }
-  glass[glass_count].index = index;
-  return glass_count++;
+  bg_type = SPHERE_MAP;
 }
 
 #define JSON_OBJ_EACH(obj, key, val, block) if (obj->length > 0) { \
@@ -932,6 +686,17 @@ static inline bool json_vec3(vec3 r, JAny j) {
   i = i->next;
   r[2] = json_float(i->value);
   return true;
+}
+
+static inline void json_count_types(JObj obj, int n, const char **types, int *counts) {
+  JSON_OBJ_EACH(obj, _, val, {
+    JStr type_str = json_value_as_string(json_aref(json_value_as_object(val), "type"));
+    for (int i = 0; i < n; i++) {
+      if (0 == strcmp(types[i], type_str->string)) {
+        counts[i]++;
+      }
+    }
+  });
 }
 
 typedef struct hashmap_s Hash;
@@ -1176,7 +941,7 @@ static void parse_cube_map(JObj bg) {
   JSON_ARY_EACH(ary, it, i, {
     i2ti(HGET(textures_h, json_value_as_string(it)), &cube_map.tex[i]);
   });
-  bg_type = CUBEMAP;
+  bg_type = CUBE_MAP;
 }
 
 static GLuint render_tex = 0;
@@ -1184,37 +949,28 @@ static GLuint fb = 0;
 
 void make_framebuffer(int w, int h) {
   glGenFramebuffers(1, &fb);
-  glErrorCheck("gen fb");
   glBindFramebuffer(GL_FRAMEBUFFER, fb);
-  glErrorCheck("bind fb");
 
   glGenTextures(1, &render_tex);
-  glErrorCheck("gen render tex");
 
   glBindTexture(GL_TEXTURE_2D, render_tex);
-  glErrorCheck("bind render tex");
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, NULL);
-  glErrorCheck("render tex 2d");
 
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glErrorCheck("render tex param");
   glBindTexture(GL_TEXTURE_2D, 0);
-  glErrorCheck("render tex unbind");
 
   glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, render_tex, 0);
-  glErrorCheck("fb tex");
   glDrawBuffer(GL_COLOR_ATTACHMENT0);
-  glErrorCheck("fb drawbuf");
 
   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
     fprintf(stderr, "framebuffer incomplete!\n");
   }
+  glErrorCheck("make framebuffer");
 
-  glActiveTexture(GL_TEXTURE1);
-  glErrorCheck("render active tex");
+  glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, render_tex);
-  glErrorCheck("bind render tex 2");
+  glErrorCheck("bind render tex");
 }
 
 void remake_framebuffer(int w, int h) {
@@ -1260,6 +1016,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  srand(time(NULL));
+  build_decoding_table();
 
   size_t scene_filesize;
   char *scene_file = load_file(argv[1], &scene_filesize);
@@ -1274,82 +1032,6 @@ int main(int argc, char **argv) {
     fprintf(stderr, "could not parse scene as object\n");
     return 1;
   }
-
-  build_decoding_table();
-
-  srand(time(NULL));
-  glfwInit();
-
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
-  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-
-  GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT, "raysetta-gl", NULL, NULL);
-  glfwMakeContextCurrent(window);
-
-  int version = gladLoadGL(glfwGetProcAddress);
-  printf("GL %d.%d\n", GLAD_VERSION_MAJOR(version), GLAD_VERSION_MINOR(version));
-
-  // glEnable(GL_FRAMEBUFFER_SRGB);
-  // glEnable(GL_BLEND);
-  // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-  GLuint vao;
-  glGenVertexArrays(1, &vao);
-
-  GLuint vert, frag;
-  if (!load_shader("full_screen.vert", GL_VERTEX_SHADER, &vert)) return 1;
-  if (!load_shader("rt.frag", GL_FRAGMENT_SHADER, &frag)) return 1;
-
-  const GLuint program = glCreateProgram();
-  glAttachShader(program, vert);
-  glAttachShader(program, frag);
-  glLinkProgram(program);
-
-  if (!check_program(program)) {
-    fprintf(stderr, "failed to link rt program\n");
-    print_shader_info_log(vert);
-    print_shader_info_log(frag);
-    print_program_info_log(program);
-    return 1;
-  }
-
-  GLuint screen_frag;
-  if (!load_shader("screen.frag", GL_FRAGMENT_SHADER, &screen_frag)) return 1;
-
-  const GLuint screen_program = glCreateProgram();
-  glAttachShader(screen_program, vert);
-  glAttachShader(screen_program, screen_frag);
-  glLinkProgram(screen_program);
-
-  if (!check_program(screen_program)) {
-    fprintf(stderr, "failed to link screen program\n");
-    print_shader_info_log(vert);
-    print_shader_info_log(screen_frag);
-    print_program_info_log(screen_program);
-    return 1;
-  }
-
-  glDeleteShader(vert);
-  glDeleteShader(frag);
-  glDeleteShader(screen_frag);
-
-  glUseProgram(program);
-  glErrorCheck("shader");
-
-  GLuint time_loc = glGetUniformLocation(program, "time");
-  GLuint frame_loc = glGetUniformLocation(program, "frame");
-
-  const int samples = 1;
-  const int depth = 5;
-
-  GLuint samples_loc = glGetUniformLocation(program, "samples");
-  glUniform1i(samples_loc, samples);
-  GLuint depth_loc = glGetUniformLocation(program, "depth");
-  glUniform1i(depth_loc, depth);
-
-  res_loc = glGetUniformLocation(program, "res");
-  glUniform2f(res_loc, WIDTH, HEIGHT);
 
   vec3_set(cam.eye, 0.0, 0.0, 0.0);
   vec3_set(cam.tgt, 0.0, 0.0, -1.0);
@@ -1373,20 +1055,6 @@ int main(int argc, char **argv) {
   JAny focus_dist_val = json_aref(cam_json, "focus_dist");
   if (focus_dist_val) cam.focus_dist = json_float(focus_dist_val);
 
-  GLuint eye_loc = glGetUniformLocation(program, "eye");
-  glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
-  GLuint tgt_loc = glGetUniformLocation(program, "tgt");
-  glUniform3f(tgt_loc, cam.tgt[0], cam.tgt[1], cam.tgt[2]);
-  GLuint vup_loc = glGetUniformLocation(program, "vup");
-  glUniform3f(vup_loc, cam.vup[0], cam.vup[1], cam.vup[2]);
-  GLuint vfov_loc = glGetUniformLocation(program, "vfov");
-  glUniform1f(vfov_loc, cam.vfov);
-  GLuint defocus_angle_loc = glGetUniformLocation(program, "defocus_angle");
-  glUniform1f(defocus_angle_loc, cam.defocus_angle);
-  GLuint focus_dist_loc = glGetUniformLocation(program, "focus_dist");
-  glUniform1f(focus_dist_loc, cam.focus_dist);
-  glErrorCheck("cam");
-
   JObj noises_json = json_value_as_object(json_aref(scene, "noises"));
   if (!noises_json) { fprintf(stderr, "noises missing or is not an object!\n"); return 1; }
   JObj images_json = json_value_as_object(json_aref(scene, "images"));
@@ -1401,21 +1069,46 @@ int main(int argc, char **argv) {
   HNEW(textures_h, textures_json->length);
   HNEW(materials_h, materials_json->length);
 
+  MALLOC(perlins, Perlin, noises_json->length);
   JSON_OBJ_EACH(noises_json, k, v, {
     HPUT(noises_h, k, parse_noise(json_value_as_object(v)));
   });
+
+  MALLOC(images, ImageData, images_json->length);
   JSON_OBJ_EACH(images_json, k, v, {
     HPUT(images_h, k, parse_image(json_value_as_object(v)));
   });
+
+  int tex_counts[] = {0,0,0,0};
+  json_count_types(textures_json, 4, (const char*[]){"SolidColor", "Checker", "Image", "Noise"}, tex_counts);
+  MALLOC(solid_colors, SolidColor, tex_counts[0]);
+  MALLOC(checkers, Checker, tex_counts[1]);
+  MALLOC(image_tex, ImageTex, tex_counts[2]);
+  MALLOC(noises, Noise, tex_counts[3]);
   JSON_OBJ_EACH(textures_json, k, v, {
     HPUT(textures_h, k, parse_texture(json_value_as_object(v)));
   });
+
+  int mat_counts[] = {0,0,0,0};
+  json_count_types(materials_json, 4, (const char*[]){"Lambertian", "Metal", "Dielectric", "DiffuseLight"}, mat_counts);
+  MALLOC(lamberts, Lambert, mat_counts[0]);
+  MALLOC(metals, Metal, mat_counts[1]);
+  MALLOC(glass, Glass, mat_counts[2]);
+  MALLOC(lights, Light, mat_counts[3]);
   JSON_OBJ_EACH(materials_json, k, v, {
     HPUT(materials_h, k, parse_material(json_value_as_object(v)));
   });
 
   JObj world_json = json_value_as_object(json_aref(scene, "world"));
   if (!world_json) { fprintf(stderr, "world missing or is not an object!\n"); return 1; }
+  int obj_counts[] = {0,0,0,0,0};
+  json_count_types(world_json, 5, (const char*[]){"Sphere", "MovingSphere", "Quad", "Tri", "Box"}, obj_counts);
+  const int num_spheres = obj_counts[0] + obj_counts[1];
+  const int num_planes = obj_counts[2] + obj_counts[3] + 6*obj_counts[4];
+  const int num_objects = num_spheres + num_planes;
+  MALLOC(objects, Object, num_objects);
+  MALLOC(spheres, Sphere, num_spheres);
+  MALLOC(planes, Plane, num_planes);
   JSON_OBJ_EACH(world_json, _, val, {
     JObj obj = json_value_as_object(val);
     JStr type_str = json_value_as_string(json_aref(obj, "type"));
@@ -1456,122 +1149,281 @@ int main(int argc, char **argv) {
 
   free(scene_json);
 
+  bvh_nodes = malloc(sizeof(BVHNode)*(num_objects*2-1));
   make_bvh_nodes(0, obj_count);
+
+  if (GLFW_TRUE != glfwInit()) {
+    fprintf(stderr, "failed to init GLFW\n");
+    return 1;
+  }
+
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+  GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT, "raysetta-gl", NULL, NULL);
+  if (!window) {
+    fprintf(stderr, "failed to create window\n");
+    glfwTerminate();
+    return 1;
+  }
+  glfwMakeContextCurrent(window);
+
+  int version = gladLoadGL(glfwGetProcAddress);
+  printf("GL %d.%d\n", GLAD_VERSION_MAJOR(version), GLAD_VERSION_MINOR(version));
+
+  GLuint vao;
+  glGenVertexArrays(1, &vao);
+
+  GLuint vert, frag;
+  if (!load_shader_from_file("full_screen.vert", GL_VERTEX_SHADER, &vert)) return 1;
+
+  size_t rt_bytes;
+  char *rt_src = load_file_cstr("rt.frag", &rt_bytes);
+
+  size_t extra_bytes = 500;
+  char *frag_src = malloc(rt_bytes + extra_bytes);
+  int frag_bytes = sprintf(frag_src,
+    "#version 410\n"
+    "precision highp float;\n"
+    "#define SPHERE_COUNT %i\n"
+    "#define PLANE_COUNT %i\n"
+    "#define LAMBERT_COUNT %i\n"
+    "#define METAL_COUNT %i\n"
+    "#define GLASS_COUNT %i\n"
+    "#define LIGHT_COUNT %i\n"
+    "#define SOLID_COUNT %i\n"
+    "#define CHECKER_COUNT %i\n"
+    "#define IMAGE_TEX_COUNT %i\n"
+    "#define NOISE_COUNT %i\n"
+    "#define IMAGE_COUNT %i\n"
+    "#define PERLIN_COUNT %i\n"
+    "#define BVH_COUNT %i\n"
+    "#define BG_TYPE %i\n"
+    "%s",
+    sphere_count, plane_count,
+    lambert_count, metal_count, glass_count, light_count,
+    solid_color_count, checker_count, image_tex_count, noise_count,
+    image_count, perlin_count, bvh_count, bg_type,
+    rt_src
+  );
+  if (frag_bytes < 0) {
+    fprintf(stderr, "failed to generate shader source\n");
+    return 1;
+  }
+  free(rt_src);
+
+  frag = load_shader(frag_src, GL_FRAGMENT_SHADER);
+  free(frag_src);
+
+  const GLuint program = glCreateProgram();
+  glAttachShader(program, vert);
+  glAttachShader(program, frag);
+  glLinkProgram(program);
+
+  if (!check_program(program)) {
+    fprintf(stderr, "failed to link rt program\n");
+    print_shader_info_log(vert);
+    print_shader_info_log(frag);
+    print_program_info_log(program);
+    return 1;
+  }
+
+  GLuint screen_frag;
+  if (!load_shader_from_file("screen.frag", GL_FRAGMENT_SHADER, &screen_frag)) return 1;
+
+  const GLuint screen_program = glCreateProgram();
+  glAttachShader(screen_program, vert);
+  glAttachShader(screen_program, screen_frag);
+  glLinkProgram(screen_program);
+
+  if (!check_program(screen_program)) {
+    fprintf(stderr, "failed to link screen program\n");
+    print_shader_info_log(vert);
+    print_shader_info_log(screen_frag);
+    print_program_info_log(screen_program);
+    return 1;
+  }
+  glUseProgram(program);
+  glErrorCheck("shader");
+
+  GLuint time_loc = glGetUniformLocation(program, "time");
+  GLuint frame_loc = glGetUniformLocation(program, "frame");
+
+  const int samples = 1;
+  const int depth = 5;
+
+  GLuint samples_loc = glGetUniformLocation(program, "samples");
+  glUniform1i(samples_loc, samples);
+  GLuint depth_loc = glGetUniformLocation(program, "depth");
+  glUniform1i(depth_loc, depth);
+
+  res_loc = glGetUniformLocation(program, "res");
+  glUniform2f(res_loc, WIDTH, HEIGHT);
+
+  glDeleteShader(vert);
+  glDeleteShader(frag);
+  glDeleteShader(screen_frag);
 
   GLuint bvh_count_loc = glGetUniformLocation(program, "bvh_count");
   glUniform1i(bvh_count_loc, bvh_count);
 
-  GLuint obj_buf = make_unibuffer(program, sizeof(Sphere)*MAX_SPH+sizeof(Plane)*MAX_PLN, "ObjBlock");
+  GLuint eye_loc = glGetUniformLocation(program, "eye");
+  glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
+  GLuint tgt_loc = glGetUniformLocation(program, "tgt");
+  glUniform3f(tgt_loc, cam.tgt[0], cam.tgt[1], cam.tgt[2]);
+  GLuint vup_loc = glGetUniformLocation(program, "vup");
+  glUniform3f(vup_loc, cam.vup[0], cam.vup[1], cam.vup[2]);
+  GLuint vfov_loc = glGetUniformLocation(program, "vfov");
+  glUniform1f(vfov_loc, cam.vfov);
+  GLuint defocus_angle_loc = glGetUniformLocation(program, "defocus_angle");
+  glUniform1f(defocus_angle_loc, cam.defocus_angle);
+  GLuint focus_dist_loc = glGetUniformLocation(program, "focus_dist");
+  glUniform1f(focus_dist_loc, cam.focus_dist);
+  glErrorCheck("cam");
+
+  GLuint obj_buf = make_unibuffer(program, sizeof(Sphere)*sphere_count+sizeof(Plane)*plane_count, "ObjBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, obj_buf);
   if (sphere_count > 0)
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
   if (plane_count> 0)
-    glBufferSubData(GL_UNIFORM_BUFFER, sizeof(Sphere)*MAX_SPH, sizeof(Plane)*plane_count, planes);
+    glBufferSubData(GL_UNIFORM_BUFFER, sizeof(Sphere)*sphere_count, sizeof(Plane)*plane_count, planes);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind obj");
+  FREE(spheres);
+  FREE(planes);
 
   GLuint mat_buf = make_unibuffer(program,
-                    sizeof(Lambert)*MAX_MATS+
-                      sizeof(Metal)*MAX_MATS+
-                      sizeof(Glass)*MAX_MATS+
-                      sizeof(Light)*MAX_MATS,
+                    sizeof(Lambert)*lambert_count+
+                      sizeof(Metal)*metal_count+
+                      sizeof(Glass)*glass_count+
+                      sizeof(Light)*light_count,
                     "MatBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, mat_buf);
   if (lambert_count > 0)
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Lambert)*lambert_count, lamberts);
   if (metal_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(Lambert)*MAX_MATS,
+                  sizeof(Lambert)*lambert_count,
                   sizeof(Metal)*metal_count,
                   metals);
   if (glass_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(Lambert)*MAX_MATS + sizeof(Metal)*MAX_MATS,
+                  sizeof(Lambert)*lambert_count + sizeof(Metal)*metal_count,
                   sizeof(Glass)*glass_count,
                   glass);
   if (light_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(Lambert)*MAX_MATS + sizeof(Metal)*MAX_MATS+sizeof(Glass)*MAX_MATS,
+                  sizeof(Lambert)*lambert_count + sizeof(Metal)*metal_count+sizeof(Glass)*glass_count,
                   sizeof(Light)*light_count,
                   lights);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
+  FREE(lamberts);
+  FREE(metals);
+  FREE(glass);
+  FREE(lights);
 
-  GLuint bvh_buf = make_unibuffer(program, sizeof(BVHNode)*MAX_BVH, "BvhBlock");
+  GLuint bvh_buf = make_unibuffer(program, sizeof(BVHNode)*bvh_count, "BvhBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, bvh_buf);
   if (bvh_count > 0)
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(BVHNode)*bvh_count, bvh_nodes);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind mat");
+  FREE(bvh_nodes);
+  FREE(objects);
 
   GLuint tex_buf = make_unibuffer(program,
-                    sizeof(SolidColor)*MAX_TEX+
-                      sizeof(Checker)*MAX_TEX+
-                      sizeof(ImageTex)*MAX_IMG+
-                      sizeof(Noise)*MAX_TEX,
+                    sizeof(SolidColor)*solid_color_count+
+                      sizeof(Checker)*checker_count+
+                      sizeof(ImageTex)*image_tex_count+
+                      sizeof(Noise)*noise_count,
                     "TexBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, tex_buf);
   if (solid_color_count > 0)
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(SolidColor)*solid_color_count, solid_colors);
   if (checker_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(SolidColor)*MAX_TEX,
+                  sizeof(SolidColor)*solid_color_count,
                   sizeof(Checker)*checker_count, checkers);
   if (image_tex_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(SolidColor)*MAX_TEX + sizeof(Checker)*MAX_TEX,
+                  sizeof(SolidColor)*solid_color_count + sizeof(Checker)*checker_count,
                   sizeof(ImageTex)*image_tex_count, image_tex);
   if (noise_count > 0) glBufferSubData(GL_UNIFORM_BUFFER,
-                  sizeof(SolidColor)*MAX_TEX + sizeof(Checker)*MAX_TEX + sizeof(ImageTex)*MAX_IMG,
+                  sizeof(SolidColor)*solid_color_count + sizeof(Checker)*checker_count + sizeof(ImageTex)*image_tex_count,
                   sizeof(Noise)*noise_count, noises);
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind tex");
+  FREE(solid_colors);
+  FREE(checkers);
+  FREE(image_tex);
+  FREE(noises);
 
-  GLuint perl_buf = make_unibuffer(program, sizeof(Perlin)*MAX_PERLIN, "PerlinBlock");
-  glBindBuffer(GL_UNIFORM_BUFFER, perl_buf);
-  if (perlin_count > 0)
-    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Perlin)*perlin_count, perlins);
-  glBindBuffer(GL_UNIFORM_BUFFER, 0);
-  glErrorCheck("bind perlin");
+  if (perlin_count > 0) {
+    GLuint perl_buf = make_unibuffer(program, sizeof(Perlin)*perlin_count, "PerlinBlock");
+    glBindBuffer(GL_UNIFORM_BUFFER, perl_buf);
+    if (perlin_count > 0)
+      glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Perlin)*perlin_count, perlins);
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    glErrorCheck("bind perlin");
+    FREE(perlins);
+  }
 
-  GLuint bg_buf = make_unibuffer(program, sizeof(SolidColor)+sizeof(Gradient)+sizeof(TypeId)+sizeof(CubeMap), "BgBlock");
-  glBindBuffer(GL_UNIFORM_BUFFER, bg_buf);
+  GLuint bg_buf;
   switch (bg_type) {
-  case SOLID: glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(SolidColor), &solid_bg); break;
-  case GRAD: glBufferSubData(GL_UNIFORM_BUFFER, sizeof(SolidColor), sizeof(Gradient), &grad_bg); break;
-  case SPHMAP: glBufferSubData(GL_UNIFORM_BUFFER, sizeof(SolidColor)+sizeof(Gradient), sizeof(TypeId), &sphere_map); break;
-  case CUBEMAP: glBufferSubData(GL_UNIFORM_BUFFER, sizeof(SolidColor)+sizeof(Gradient)+sizeof(TypeId), sizeof(CubeMap), &cube_map); break;
+  case SOLID:
+    bg_buf = make_unibuffer(program, sizeof(SolidColor), "BgBlock");
+    glBindBuffer(GL_UNIFORM_BUFFER, bg_buf);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(SolidColor), &solid_bg); break;
+    break;
+  case GRADIENT:
+    bg_buf = make_unibuffer(program, sizeof(Gradient), "BgBlock");
+    glBindBuffer(GL_UNIFORM_BUFFER, bg_buf);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Gradient), &grad_bg); break;
+    break;
+  case SPHERE_MAP:
+    bg_buf = make_unibuffer(program, sizeof(TypeId), "BgBlock");
+    glBindBuffer(GL_UNIFORM_BUFFER, bg_buf);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(TypeId), &sphere_map); break;
+    break;
+  case CUBE_MAP:
+    bg_buf = make_unibuffer(program, sizeof(CubeMap), "BgBlock");
+    glBindBuffer(GL_UNIFORM_BUFFER, bg_buf);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(CubeMap), &cube_map); break;
+    break;
   }
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
-  GLuint bg_type_loc = glGetUniformLocation(program, "bg_type");
-  glUniform1i(bg_type_loc, bg_type);
   glErrorCheck("bind bg");
 
-  GLuint images_tex = 0;
-  glGenTextures(1, &images_tex);
-  glBindTexture(GL_TEXTURE_2D_ARRAY, images_tex);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);	
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  glErrorCheck("tex param");
-  glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGB32F, next_po2(max_width), next_po2(max_height), image_count < 1 ? 1 : image_count);
-  glErrorCheck("tex storage 3d");
-  for (int i = 0; i < image_count; i++) {
-    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, images[i].width, images[i].height, 1, GL_RGB, GL_FLOAT, images[i].data);
-    free(images[i].data);
-    glErrorCheck("tex sub data 3d");
-  }
-  glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-  glErrorCheck("setup images");
+  if (image_count > 0) {
+    GLuint images_tex = 0;
+    glGenTextures(1, &images_tex);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, images_tex);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);	
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glErrorCheck("tex param");
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGB32F, next_po2(max_width), next_po2(max_height), image_count < 1 ? 1 : image_count);
+    glErrorCheck("tex storage 3d");
+    for (int i = 0; i < image_count; i++) {
+      glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, images[i].width, images[i].height, 1, GL_RGB, GL_FLOAT, images[i].data);
+      free(images[i].data);
+      glErrorCheck("tex sub data 3d");
+    }
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    glErrorCheck("setup images");
+    FREE(images);
 
-  GLuint images_loc = glGetUniformLocation(program, "images");
-  glUniform1i(images_loc, 0);
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D_ARRAY, images_tex);
+    GLuint images_loc = glGetUniformLocation(program, "images");
+    glUniform1i(images_loc, 1);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, images_tex);
+  }
 
   make_framebuffer(WIDTH, HEIGHT);
 
   GLuint prev_frame_loc = glGetUniformLocation(program, "prev_frame");
-  glUniform1i(prev_frame_loc, 1);
+  glUniform1i(prev_frame_loc, 0);
 
   glUseProgram(screen_program);
   GLuint frame_tex_loc = glGetUniformLocation(screen_program, "frame");
-  glUniform1i(frame_tex_loc, 1);
-  
+  glUniform1i(frame_tex_loc, 0);
+
   glfwGetCursorPos(window, &last_mouse[0], &last_mouse[1]);
 
   glfwSetFramebufferSizeCallback(window, on_resize);

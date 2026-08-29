@@ -1,15 +1,3 @@
-#version 410
-precision highp float;
-
-#define MAX_SPH 500
-#define MAX_PLN 100
-const int  MAX_OBJS = MAX_SPH+MAX_PLN;
-#define MAX_MATS MAX_OBJS
-#define MAX_TEX MAX_MATS
-#define MAX_IMG 64
-#define MAX_PERLIN 8
-const int MAX_BVH = MAX_OBJS*2+1;
-
 const float PI = 3.1415926535897932385;
 
 const ivec3 CUBE[8] = ivec3[](
@@ -60,8 +48,11 @@ uniform float focus_dist;
 uniform int samples;
 uniform int depth;
 
-uniform sampler2DArray images;
 uniform sampler2D prev_frame;
+
+#if IMAGE_COUNT > 0
+uniform sampler2DArray images;
+#endif
 
 uniform float time;
 uniform uint utime;
@@ -84,9 +75,9 @@ uniform uint frame;
 #define IMAGE 2
 #define NOISE 3
 
-#define GRAD 1
-#define CUBEMAP 2
-#define SPHMAP 3
+#define GRADIENT 1
+#define CUBE_MAP 2
+#define SPHERE_MAP 3
 
 vec2 scr;
 float aspect;
@@ -118,59 +109,80 @@ struct AABB {
   vec3 max;
 };
 
+#if LAMBERT_COUNT > 0
 struct Lambert {
   TypeId tex;
 };
+#endif
 
+#if LIGHT_COUNT > 0
 struct Light {
   TypeId tex;
 };
+#endif
 
+#if METAL_COUNT > 0
 struct Metal {
   float fuzz;
   TypeId tex;
 };
+#endif
 
+#if GLASS_COUNT > 0
 struct Glass {
   float index;
 };
+#endif
 
+#if SOLID_COUNT > 0 || BG_TYPE == SOLID
 struct SolidColor {
   vec3 albedo;
 };
+#endif
 
+#if CHECKER_COUNT > 0
 struct Checker {
   float inv_scale;
   TypeId even;
   TypeId odd;
 };
+#endif
 
+#if IMAGE_COUNT > 0
 struct Image {
   int id;
   int width;
   int height;
 };
+#endif
 
+#if PERLIN_COUNT > 0
 #define POINT_COUNT 256
 struct Perlin {
   vec3 randvec[POINT_COUNT];
   ivec3 perm[POINT_COUNT];
 };
+#endif
 
+#if NOISE_COUNT > 0
 struct Noise {
   int id;
   float scale;
   int depth;
   int axis;
 };
+#endif
 
+#if SPHERE_COUNT > 0
 struct Sphere {
   vec3 center;
   vec3 vec;
   float radius;
   TypeId mat;
 };
+#endif
 
+#if PLANE_COUNT > 0
 struct Plane {
   vec3 q;
   vec3 u;
@@ -181,6 +193,7 @@ struct Plane {
   int type;
   TypeId mat;
 };
+#endif
 
 struct Hit {
   float t;
@@ -199,48 +212,78 @@ struct BVHNode {
   AABB bbox;
 };
 
+#if BG_TYPE == GRADIENT
 struct Gradient {
   vec3 top;
   vec3 bottom;
 };
+#endif
 
+#if BG_TYPE == CUBE_MAP
 struct CubeMap {
   TypeId ids[6];
 };
+#endif
 
 layout (std140) uniform ObjBlock {
-  Sphere spheres[MAX_SPH];
-  Plane planes[MAX_PLN];
+  #if SPHERE_COUNT > 0
+  Sphere spheres[SPHERE_COUNT];
+  #endif
+  #if PLANE_COUNT > 0
+  Plane planes[PLANE_COUNT];
+  #endif
 };
 
 layout (std140) uniform MatBlock {
-  Lambert lamberts[MAX_MATS];
-  Metal metals[MAX_MATS];
-  Glass glass[MAX_MATS];
-  Light lights[MAX_MATS];
+  #if LAMBERT_COUNT > 0
+  Lambert lamberts[LAMBERT_COUNT];
+  #endif
+  #if METAL_COUNT > 0
+  Metal metals[METAL_COUNT];
+  #endif
+  #if GLASS_COUNT > 0
+  Glass glass[GLASS_COUNT];
+  #endif
+  #if LIGHT_COUNT > 0
+  Light lights[LIGHT_COUNT];
+  #endif
 };
 
 layout (std140) uniform TexBlock {
-  SolidColor solid_colors[MAX_TEX];
-  Checker checkers[MAX_TEX];
-  Image image_tex[MAX_IMG];
-  Noise noises[MAX_TEX];
+  #if SOLID_COUNT > 0
+  SolidColor solid_colors[SOLID_COUNT];
+  #endif
+  #if CHECKER_COUNT > 0
+  Checker checkers[CHECKER_COUNT];
+  #endif
+  #if IMAGE_TEX_COUNT > 0
+  Image image_tex[IMAGE_COUNT];
+  #endif
+  #if NOISE_COUNT > 0
+  Noise noises[NOISE_COUNT];
+  #endif
 };
 
+#if PERLIN_COUNT > 0
 layout (std140) uniform PerlinBlock {
-  Perlin perlins[MAX_PERLIN];
+  Perlin perlins[PERLIN_COUNT];
 };
+#endif
 
 layout (std140) uniform BvhBlock {
-  BVHNode bvh[MAX_BVH];
+  BVHNode bvh[BVH_COUNT];
 };
 
-uniform int bg_type;
 layout (std140) uniform BgBlock {
+  #if BG_TYPE == SOLID
   SolidColor solid_bg;
+  #elif BG_TYPE == GRADIENT
   Gradient grad_bg;
+  #elif BG_TYPE == SPHERE_MAP
   TypeId sphere_map;
+  #elif BG_TYPE == CUBE_MAP
   CubeMap cube_map;
+  #endif
 };
 
 uniform int bvh_count;
@@ -326,10 +369,8 @@ void set_face_normal(Ray ray, vec3 n, inout Hit hit) {
   hit.n = hit.front ? n : -n;
 }
 
-vec3 solid_sample(SolidColor tex, vec2 uv, vec3 pt) {
-  return tex.albedo;
-}
 
+#if IMAGE_COUNT > 0
 vec3 image_sample(Image tex, vec2 uv, vec3 pt) {
   float u = clamp(uv.x, 0.0, 1.0)*tex.width;
   float v = (1.0 - clamp(uv.y, 0.0, 1.0))*tex.height;
@@ -351,7 +392,9 @@ vec3 image_sample(Image tex, vec2 uv, vec3 pt) {
     fy
   ).xyz;
 }
+#endif
 
+#if PERLIN_COUNT > 0
 float perlin_interp(vec3 c[8], vec3 vc) {
   vec3 v = smthstp(vc);
   float sum = 0.0;
@@ -401,7 +444,9 @@ float turb(Perlin self, vec3 pt, int d) {
 
   return abs(accum);
 }
+#endif
 
+#if NOISE_COUNT > 0
 vec3 noise_sample(Noise tex, vec2 uv, vec3 pt) {
   Perlin noise = perlins[tex.id];
   if (tex.axis < 0) {
@@ -410,28 +455,38 @@ vec3 noise_sample(Noise tex, vec2 uv, vec3 pt) {
     return vec3(0.5) * (1.0 + sin(tex.scale * pt[tex.axis] + 10.0 * turb(noise, pt, tex.depth)));
   }
 }
+#endif
 
 vec3 nochk_tex_sample(TypeId tex, vec2 uv, vec3 pt) {
+  #if SOLID_COUNT > 0
   if (tex.type == SOLID) {
-    return solid_sample(solid_colors[tex.id], uv, pt);
-  } else if (tex.type == IMAGE) {
+    return solid_colors[tex.id].albedo;
+  } else
+  #endif
+  #if IMAGE_TEX_COUNT > 0
+  if (tex.type == IMAGE) {
     return image_sample(image_tex[tex.id], uv, pt);
-  } else if (tex.type == NOISE) {
+  } else
+  #endif
+  #if NOISE_COUNT > 0
+  if (tex.type == NOISE) {
     return noise_sample(noises[tex.id], uv, pt);
-  } else {
-    return vec3(1.0, 0.0, 1.0);
-  }
+  } else
+  #endif
+  return vec3(1.0, 0.0, 1.0);
 }
 
 vec3 chk_subtex_sample(TypeId tex, vec2 uv, vec3 pt) {
+  #if CHECKER_COUNT > 0
   if (tex.type == CHECKER) {
     // can't recurse checker
     return vec3(1.0, 0.0, 0.0);
-  } else {
-    return nochk_tex_sample(tex, uv, pt);
-  }
+  } else
+  #endif
+  return nochk_tex_sample(tex, uv, pt);
 }
 
+#if CHECKER_COUNT > 0
 vec3 checker_sample(Checker tex, vec2 uv, vec3 pt) {
   int x = int(floor(tex.inv_scale * pt.x));
   int y = int(floor(tex.inv_scale * pt.y));
@@ -443,15 +498,18 @@ vec3 checker_sample(Checker tex, vec2 uv, vec3 pt) {
     return chk_subtex_sample(tex.odd, uv, pt);
   }
 }
+#endif
 
 vec3 tex_sample(TypeId tex, vec2 uv, vec3 pt) {
+  #if CHECKER_COUNT > 0
   if (tex.type == CHECKER) {
     return checker_sample(checkers[tex.id], uv, pt);
-  } else {
-    return nochk_tex_sample(tex, uv, pt);
-  }
+  } else
+  #endif
+  return nochk_tex_sample(tex, uv, pt);
 }
 
+#if LAMBERT_COUNT > 0
 bool scat_lambert(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   Lambert mat = lamberts[hit.mat.id];
   vec3 scat_dir = hit.n + rand_unit();
@@ -460,7 +518,9 @@ bool scat_lambert(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   att = tex_sample(mat.tex, hit.uv, hit.p);
   return true;
 }
+#endif
 
+#if METAL_COUNT > 0
 bool scat_metal(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   Metal mat = metals[hit.mat.id];
   vec3 r = normalize(reflect(r_in.dir, hit.n)) + (mat.fuzz * rand_unit());
@@ -468,7 +528,9 @@ bool scat_metal(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   att = tex_sample(mat.tex, hit.uv, hit.p);
   return (dot(r, hit.n) > 0.0);
 }
+#endif
 
+#if GLASS_COUNT > 0
 float reflectance(float cosine, float ri) {
   // Use Schlick's approximation for reflectance.
   float r0 = (1.0 - ri) / (1.0 + ri);
@@ -496,29 +558,34 @@ bool scat_glass(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
   scat = Ray(hit.p, dir, r_in.tm);
   return true;
 }
-
-vec3 emit_light(Light self, vec2 uv, vec3 pt) {
-  return tex_sample(self.tex, uv, pt);
-}
+#endif
 
 vec3 emit(Hit hit) {
+  #if LIGHT_COUNT > 0
   if (hit.mat.type == LIGHT) {
-    return emit_light(lights[hit.mat.id], hit.uv, hit.p);
-  } else {
-    return vec3(0.0, 0.0, 0.0);
-  }
+    return tex_sample(lights[hit.mat.id].tex, hit.uv, hit.p);
+  } else
+  #endif
+  return vec3(0.0, 0.0, 0.0);
 }
 
 bool scat(Ray r_in, Hit hit, out vec3 att, out Ray scat) {
+  #if LAMBERT_COUNT > 0
   if (hit.mat.type == LAMBERT) {
     return scat_lambert(r_in, hit, att, scat);
-  } else if (hit.mat.type == METAL) {
+  } else
+  #endif
+  #if METAL_COUNT > 0
+  if (hit.mat.type == METAL) {
     return scat_metal(r_in, hit, att, scat);
-  } else if (hit.mat.type == GLASS) {
+  } else
+  #endif
+  #if GLASS_COUNT > 0
+  if (hit.mat.type == GLASS) {
     return scat_glass(r_in, hit, att, scat);
-  } else {
-    return false;
-  }
+  } else
+  #endif
+  return false;
 }
 
 bool hit_aabb(AABB self, Ray r, Range ray_t) {
@@ -554,6 +621,7 @@ vec2 sphere_uv(vec3 p) {
   return vec2(phi / (2.0*PI), theta / PI);
 }
 
+#if SPHERE_COUNT > 0
 bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
   vec3 center = self.center + self.vec * ray.tm;
   vec3 oc = center - ray.orig;
@@ -585,7 +653,9 @@ bool hit_sphere(Sphere self, Ray ray, Range ray_t, out Hit hit) {
 
   return true;
 }
+#endif
 
+#if PLANE_COUNT > 0
 bool quad_interior(float a, float b, out vec2 uv) {
   Range unit = Range(0.0, 1.0);
 
@@ -632,19 +702,24 @@ bool hit_plane(Plane self, Ray ray, Range ray_t, out Hit hit) {
 
   return true;
 }
+#endif
 
 bool hit_obj(int type, int id, Ray r, Range rt, out Hit hit) {
+  #if SPHERE_COUNT > 0
   if (type == SPHERE) {
     return hit_sphere(spheres[id], r, rt, hit);
-  } else if (type == PLANE) {
+  } else
+  #endif
+  #if PLANE_COUNT > 0
+  if (type == PLANE) {
     return hit_plane(planes[id], r, rt, hit);
-  } else {
-    return false;
-  }
+  } else
+  #endif
+  return false;
 }
 
 bool hit_bvh(BVHNode self, Ray ray, Range ray_t, out Hit hit) {
-  int stack[MAX_BVH];
+  int stack[BVH_COUNT];
   int si = 0;
   bool did_hit = false;
   stack[si++] = bvh_count-1;
@@ -690,6 +765,7 @@ Ray get_ray() {
   return Ray(ray_orig, ray_dir, rand());
 }
 
+#if BG_TYPE == CUBE_MAP
 vec3 sample_cube_map(Ray ray) {
   vec3 v = ray.dir;
   vec3 vabs = abs(v);
@@ -717,23 +793,24 @@ vec3 sample_cube_map(Ray ray) {
   uv = uv * ma + vec2(0.5);
   return tex_sample(cube_map.ids[fi], uv, normalize(v));
 }
+#endif
 
 vec3 bg_color(Ray ray) {
-  if (bg_type == SOLID) {
+  #if BG_TYPE == SOLID
     return solid_bg.albedo;
-  } else if (bg_type == GRAD) {
+  #elif BG_TYPE == GRADIENT
     vec3 unit_dir = normalize(ray.dir);
     float a = 0.5*(unit_dir.y + 1.0);
     return mix(grad_bg.bottom, grad_bg.top, a);
-  } else if (bg_type == SPHMAP) {
+  #elif BG_TYPE == SPHERE_MAP
     vec3 unit_dir = normalize(ray.dir);
     vec2 uv = sphere_uv(unit_dir);
     return tex_sample(sphere_map, uv, unit_dir);
-  } else if (bg_type == CUBEMAP) {
+  #elif BG_TYPE == CUBE_MAP
     return sample_cube_map(ray);
-  } else {
+  #else
     return vec3(1.0, 0.0, 0.0);
-  }
+  #endif
 }
 
 bool ray_color1(Ray ray, out Ray ray2, out vec3 att, out vec3 em) {
