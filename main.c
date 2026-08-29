@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
 #include <time.h>
 
 #define GLAD_GL_IMPLEMENTATION
@@ -11,6 +12,18 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+
+#include "json.h"
+#include "hashmap.h"
+#include "base64.h"
+
+typedef struct json_value_s *JAny;
+typedef struct json_object_s *JObj;
+typedef struct json_object_element_s *JEntry;
+typedef struct json_array_s *JAry;
+typedef struct json_array_element_s *JItem;
+typedef struct json_string_s *JStr;
+typedef struct json_number_s *JNum;
 
 #include "linmath.h"
 #include "camera.h"
@@ -64,6 +77,21 @@ typedef struct type_id {
   int type;
   float __1[2];
 } TypeId;
+
+#define TBITS 4
+
+static inline size_t t2i(int type, int id) {
+  return (id << TBITS) + type;
+}
+
+static inline void i2t(size_t i, int *type, int *id) {
+  *id = i >> TBITS;
+  *type = i & ((1 << TBITS)-1);
+}
+
+static inline void i2ti(size_t i, TypeId *ti) {
+  i2t(i, &ti->type, &ti->id);
+}
 
 typedef struct sphere {
   vec3 center;
@@ -205,22 +233,46 @@ static inline void ivec3_set(ivec3 v, int x, int y, int z) {
   v[2] = z;
 }
 
-static bool load_shader(const char *filename, GLenum type, GLuint *ret) {
+static FILE *open_file(const char *filename, size_t *len) {
   FILE *file = fopen(filename, "r");
   if (!file) {
     fprintf(stderr, "could not open file %s\n", filename);
-    return false;
+    return NULL;
   }
 
   fseek(file, 0, SEEK_END);
-  size_t length = ftell(file);
+  *len = ftell(file);
   fseek(file, 0, SEEK_SET);
+  
+  return file;
+}
+
+static char *load_file(const char *filename, size_t *len) {
+  size_t length;
+  FILE *file = open_file(filename, &length);
+  if (len) *len = length;
+  GLchar* str = malloc(length);
+  fread(str, 1, length, file);
+  fclose(file);
+  return str;
+}
+
+static char *load_file_cstr(const char *filename) {
+  size_t length;
+  FILE *file = open_file(filename, &length);
   GLchar* str = malloc(length+1);
   fread(str, 1, length, file);
   str[length] = '\0';
+  fclose(file);
+  return str;
+}
+
+static bool load_shader(const char *filename, GLenum type, GLuint *ret) {
+  GLchar *str = load_file_cstr(filename);
+  if (!str) return false;
 
   const GLuint shader = glCreateShader(type);
-  glShaderSource(shader, 1, &str, NULL);
+  glShaderSource(shader, 1, (const GLchar**)&str, NULL);
   glCompileShader(shader);
   free(str);
   *ret = shader;
@@ -287,6 +339,10 @@ bool check_program(GLuint program) {
 
 static inline float randf() {
   return (float)rand() / (float)RAND_MAX;
+}
+
+static inline double randd() {
+  return (double)rand() / (double)RAND_MAX;
 }
 
 static inline float randf_r(float min, float max) {
@@ -621,7 +677,7 @@ static inline void make_box(vec3 a, vec3 b, int mat_type, int mat_id) {
 
 static inline int make_solid_color(vec3 albedo) {
   if (solid_color_count > MAX_TEX) {
-    fprintf(stderr, "maximum number of solid colors reached (%i)", MAX_TEX);
+    fprintf(stderr, "maximum number of solid colors reached (%i)\n", MAX_TEX);
     return -1;
   }
   vec3_copy(solid_colors[solid_color_count].albedo, albedo);
@@ -630,7 +686,7 @@ static inline int make_solid_color(vec3 albedo) {
 
 static inline int make_checker(float scale, int even_type, int even_id, int odd_type, int odd_id) {
   if (checker_count > MAX_TEX) {
-    fprintf(stderr, "maximum number of checker textures reached (%i)", MAX_TEX);
+    fprintf(stderr, "maximum number of checker textures reached (%i)\n", MAX_TEX);
     return -1;
   }
   checkers[checker_count].inv_scale = 1.0 / scale;
@@ -647,7 +703,7 @@ static inline int make_solid_checker(float scale, vec3 even, vec3 odd) {
 
 static inline int make_image_tex(int id) {
   if (image_tex_count > MAX_IMG) {
-    fprintf(stderr, "maximum number of image textures reached (%i)", MAX_IMG);
+    fprintf(stderr, "maximum number of image textures reached (%i)\n", MAX_IMG);
     return -1;
   }
   if (id < 0) {
@@ -669,7 +725,7 @@ static inline void make_solid_bg(vec3 col) {
   bg_type = SOLID;
 }
 
-static inline void make_gradient_bg(vec3 top, vec3 bottom) {
+static inline void make_grad_bg(vec3 top, vec3 bottom) {
   vec3_copy(grad_bg.top, top);
   vec3_copy(grad_bg.bottom, bottom);
   bg_type = GRAD;
@@ -803,6 +859,319 @@ static inline int make_glass(float index) {
   return glass_count++;
 }
 
+#define JSON_OBJ_EACH(obj, key, val, block) if (obj->length > 0) { \
+  JEntry __el = (obj)->start; \
+  do { \
+    JStr key = __el->name; \
+    JAny val = __el->value; \
+    { block } \
+    __el = __el->next; \
+  } while (__el); }
+
+#define JSON_OBJ_EACH_CHK(obj, key, val, block) { \
+  JOBj __obj = json_value_as_object(obj); \
+  if (!__obj) fprintf(stderr, "object is not object\n"); \
+  else JSON_OBJ_EACH(__obj, key, val, block); }
+
+#define JSON_ARY_EACH(ary, it, i, block) if (ary->length > 0) { \
+    size_t i = 0; \
+    JItem __it = (ary)->start; \
+    do { \
+      JAny it = __it->value; \
+      { block } \
+      i++; \
+      __it = __it->next; \
+    } while (__it); }
+
+#define JSON_ARY_EACH_CHK(ary, it, i, block) { \
+    JOBj __ary = json_value_as_array(ary); \
+    if (!__ary) fprintf(stderr, "array is not array\n"); \
+    else JSON_ARY_EACH(__ary, it, i, block) };
+
+static inline JAny json_aref_nochk(JObj obj, const char *key) {
+  JSON_OBJ_EACH(obj, k, v, {
+    if (0 == strcmp(k->string, key)) {
+      return v;
+    } });
+  return NULL;
+}
+
+static inline JAny json_aref(JObj obj, const char *key) {
+  JAny val = json_aref_nochk(obj, key);
+  if (!val) fprintf(stderr, "obj is missing key '%s'\n", key);
+  return val;
+}
+
+static inline float json_float(JAny num) {
+  JNum jnum = json_value_as_number(num);
+  if (!jnum) { fprintf(stderr, "float is not a number\n") ; return NAN; }
+  return strtof(jnum->number, NULL);
+}
+
+static inline int json_int(JAny num) {
+  JNum jnum = json_value_as_number(num);
+  if (!jnum) { fprintf(stderr, "int is not a number\n") ; return 0; }
+  return strtol(jnum->number, NULL, 10);
+}
+
+static inline bool json_vec3(vec3 r, JAny j) {
+  JAry vec = json_value_as_array(j);
+  if (!vec) { fprintf(stderr, "vec3 is not an array\n"); return false; }
+  if (vec->length != 3) { fprintf(stderr, "vec3 does not have 3 components\n"); return false; }
+  JItem i = vec->start;
+  r[0] = json_float(i->value);
+  i = i->next;
+  r[1] = json_float(i->value);
+  i = i->next;
+  r[2] = json_float(i->value);
+  return true;
+}
+
+typedef struct hashmap_s Hash;
+
+#define HNEW(name, size) \
+  if (0 != hashmap_create((size), (&(name)))) { \
+    fprintf(stderr, "failed to create hash " #name "\n"); \
+  }
+
+#define HPUT(hash, key, val) \
+  if (0 != hashmap_put(&(hash), (key)->string, (key)->string_size, (void*)(size_t)(val))) { \
+    fprintf(stderr, "failed to put key %s into hashmap " #hash "\n", (key)->string); \
+  }
+
+#define HGET(hash, key) (size_t)hashmap_get(&(hash), (key)->string, (key)->string_size)
+#define HGETR(hash, jsn, key) HGET(hash, json_value_as_string(json_aref((jsn), #key)))
+
+static Hash noises_h;
+static Hash images_h;
+static Hash textures_h;
+static Hash materials_h;
+
+static int parse_noise(JObj json) {
+  JSON_ARY_EACH(json_value_as_array(json_aref(json, "randvec")), it, i, {
+    json_vec3(perlins[perlin_count].randvec[i], it);
+  });
+  JSON_ARY_EACH(json_value_as_array(json_aref(json, "perm_x")), it, i, {
+    perlins[perlin_count].perm[i][0] = json_int(it);
+  });
+  JSON_ARY_EACH(json_value_as_array(json_aref(json, "perm_y")), it, i, {
+    perlins[perlin_count].perm[i][1] = json_int(it);
+  });
+  JSON_ARY_EACH(json_value_as_array(json_aref(json, "perm_z")), it, i, {
+    perlins[perlin_count].perm[i][2] = json_int(it);
+  });
+  return perlin_count++;
+}
+
+static int parse_image(JObj json) {
+  JStr data_url = json_value_as_string(json_aref(json, "data"));
+  char *encoded = strchr(data_url->string, ',')+1;
+  size_t len = 0;
+  unsigned char *decoded = base64_decode(encoded, data_url->string_size - (encoded - data_url->string), &len);
+  int width, height, channels;
+  float *data = stbi_loadf_from_memory(decoded, len, &width, &height, &channels, 3);
+  if (!data) {
+    free(decoded);
+    fprintf(stderr, "failed to load image\n");
+    return -1;
+  }
+  if (width > max_width) max_width = width;
+  if (height > max_height) max_height = height;
+  images[image_count].data = data;
+  images[image_count].width = width;
+  images[image_count].height = height;
+  free(decoded);
+  return image_count++;
+}
+
+static int parse_texture(JObj json);
+
+static int parse_solid_color(JObj json) {
+  json_vec3(
+    solid_colors[solid_color_count].albedo,
+    json_aref(json, "albedo")
+  );
+  return solid_color_count++;
+}
+
+static int parse_checker_texture(JObj json) {
+  checkers[checker_count].inv_scale = 1.0 / json_float(json_aref(json, "scale"));
+  i2ti(parse_texture(json_value_as_object(json_aref(json, "even"))), &checkers[checker_count].even);
+  i2ti(parse_texture(json_value_as_object(json_aref(json, "odd"))), &checkers[checker_count].odd);
+  return checker_count++;
+}
+
+static int parse_image_texture(JObj json) {
+  int id = HGETR(images_h, json, image);
+  ImageData img = images[id];
+  image_tex[image_tex_count].id = id;
+  image_tex[image_tex_count].width = img.width;
+  image_tex[image_tex_count].height = img.height;
+  return image_tex_count++;
+}
+
+static int parse_noise_texture(JObj json) {
+  noises[noise_count].scale = json_float(json_aref(json, "scale"));
+  noises[noise_count].depth = json_int(json_aref(json, "depth"));
+  JStr jaxis = json_value_as_string(json_aref(json, "marble_axis"));
+  int axis = -1;
+  if (jaxis) {
+    if (0 == strcmp(jaxis->string, "x")) {
+      axis = 0;
+    } else if (0 == strcmp(jaxis->string, "y")) {
+      axis = 1;
+    } else if (0 == strcmp(jaxis->string, "z")) {
+      axis = 2;
+    }
+  }
+  noises[noise_count].axis = axis;
+  noises[noise_count].id = HGETR(noises_h, json, noise);
+  return noise_count++;
+}
+
+static int parse_texture(JObj json) {
+  JStr type_str = json_value_as_string(json_aref(json, "type"));
+  int type = -1;
+  int id = -1;
+  if (0 == strcmp(type_str->string, "SolidColor")) {
+    type = SOLID;
+    id = parse_solid_color(json);
+  } else if (0 == strcmp(type_str->string, "Checker")) {
+    type = CHECKER;
+    id = parse_checker_texture(json);
+  } else if (0 == strcmp(type_str->string, "Image")) {
+    type = IMAGE;
+    id = parse_image_texture(json);
+  } else if (0 == strcmp(type_str->string, "Noise")) {
+    type = NOISE;
+    id = parse_noise_texture(json);
+  } else {
+    fprintf(stderr, "unknown texture type %s\n", type_str->string);
+  }
+  if (type < 0 || id < 0) return -1;
+  return t2i(type, id);
+}
+
+static int parse_lambert(JObj json) {
+  i2ti(HGETR(textures_h, json, texture), &lamberts[lambert_count].tex);
+  return lambert_count++;
+}
+
+static int parse_metal(JObj json) {
+  i2ti(HGETR(textures_h, json, texture), &metals[metal_count].tex);
+  metals[metal_count].fuzz = json_float(json_aref(json, "fuzz"));
+  return metal_count++;
+}
+
+static int parse_glass(JObj json) {
+  glass[glass_count].index = json_float(json_aref(json, "refraction_index"));
+  return glass_count++;
+}
+
+static int parse_light(JObj json) {
+  i2ti(HGETR(textures_h, json, texture), &lights[light_count].tex);
+  return light_count++;
+}
+
+static int parse_material(JObj json) {
+  JStr type_str = json_value_as_string(json_aref(json, "type"));
+  int type = -1;
+  int id = -1;
+  if (0 == strcmp(type_str->string, "Lambertian")) {
+    type = LAMBERT;
+    id = parse_lambert(json);
+  } else if (0 == strcmp(type_str->string, "Metal")) {
+    type = METAL;
+    id = parse_metal(json);
+  } else if (0 == strcmp(type_str->string, "Dielectric")) {
+    type = GLASS;
+    id = parse_glass(json);
+  } else if (0 == strcmp(type_str->string, "DiffuseLight")) {
+    type = LIGHT;
+    id = parse_light(json);
+  } else {
+    fprintf(stderr, "unknown material type %s\n", type_str->string);
+  }
+  if (type < 0 || id < 0) return -1;
+  return t2i(type, id);
+}
+
+static int parse_sphere(JObj obj) {
+  vec3 center;
+  json_vec3(center, json_aref(obj, "center"));
+  int mat_type, mat_id;
+  i2t(HGETR(materials_h, obj, material), &mat_type, &mat_id);
+  return make_sphere(center, json_float(json_aref(obj, "radius")), mat_type, mat_id);
+}
+
+static int parse_moving_sphere(JObj obj) {
+  vec3 center1, center2;
+  json_vec3(center1, json_aref(obj, "center1"));
+  json_vec3(center2, json_aref(obj, "center2"));
+  int mat_type, mat_id;
+  i2t(HGETR(materials_h, obj, material), &mat_type, &mat_id);
+  return make_moving_sphere(center1, center2, json_int(json_aref(obj, "radius")), mat_type, mat_id);
+}
+
+static int parse_quad(JObj obj) {
+  vec3 q, u, v;
+  json_vec3(q, json_aref(obj, "q"));
+  json_vec3(u, json_aref(obj, "u"));
+  json_vec3(v, json_aref(obj, "v"));
+  int mat_type, mat_id;
+  i2t(HGETR(materials_h, obj, material), &mat_type, &mat_id);
+  return make_quad(q, u, v, mat_type, mat_id);
+}
+
+static int parse_tri(JObj obj) {
+  vec3 a, b, c;
+  json_vec3(a, json_aref(obj, "a"));
+  json_vec3(b, json_aref(obj, "b"));
+  json_vec3(c, json_aref(obj, "c"));
+  int mat_type, mat_id;
+  i2t(HGETR(materials_h, obj, material), &mat_type, &mat_id);
+  return make_tri(a, b, c, mat_type, mat_id);
+}
+
+static void parse_box(JObj obj) {
+  vec3 a, b;
+  json_vec3(a, json_aref(obj, "a"));
+  json_vec3(b, json_aref(obj, "b"));
+  int mat_type, mat_id;
+  i2t(HGETR(materials_h, obj, material), &mat_type, &mat_id);
+  make_box(a, b, mat_type, mat_id);
+}
+
+static void parse_solid_bg(JObj bg) {
+  vec3 col;
+  json_vec3(col, json_aref(bg, "albedo"));
+  make_solid_bg(col);
+}
+
+static void parse_grad_bg(JObj bg) {
+  vec3 top, bottom;
+  json_vec3(top, json_aref(bg, "top"));
+  json_vec3(bottom, json_aref(bg, "bottom"));
+  make_grad_bg(top, bottom);
+}
+
+static void parse_sphere_map(JObj bg) {
+  int type, id;
+  i2t(HGETR(textures_h, bg, texture), &type, &id);
+  make_sphere_map(type, id);
+}
+
+static void parse_cube_map(JObj bg) {
+  JAry ary = json_value_as_array(json_aref(bg, "textures"));
+  if (ary->length != 6) {
+    fprintf(stderr, "wrong number of textures for cubemap (given %lu, expected 6)\n", ary->length);
+  }
+  JSON_ARY_EACH(ary, it, i, {
+    i2ti(HGET(textures_h, json_value_as_string(it)), &cube_map.tex[i]);
+  });
+  bg_type = CUBEMAP;
+}
+
 void on_resize(GLFWwindow *win, int w, int h) {
   clear = true;
 }
@@ -830,7 +1199,29 @@ void on_scroll(GLFWwindow *win, double dx, double dy) {
   clear = true;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+  if (argc != 2) {
+    fprintf(stderr, "must pass exactly one argument, path to scene.json\n");
+    return 1;
+  }
+
+
+  size_t scene_filesize;
+  char *scene_file = load_file(argv[1], &scene_filesize);
+  JAny scene_json = json_parse(scene_file, scene_filesize);
+  free(scene_file);
+  if (!scene_json) {
+    fprintf(stderr, "could not parse scene\n");
+    return 1;
+  }
+  JObj scene = json_value_as_object(scene_json);
+  if (!scene) {
+    fprintf(stderr, "could not parse scene as object\n");
+    return 1;
+  }
+
+  build_decoding_table();
+
   srand(time(NULL));
   glfwInit();
 
@@ -844,17 +1235,9 @@ int main(void) {
   int version = gladLoadGL(glfwGetProcAddress);
   printf("GL %d.%d\n", GLAD_VERSION_MAJOR(version), GLAD_VERSION_MINOR(version));
 
-  GLsizei max_tex = 0;
-  glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
-
   glEnable(GL_FRAMEBUFFER_SRGB);
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-  float *noise = malloc(sizeof(float)*max_tex);
-  for (GLsizei i = 0; i < max_tex; i++) {
-    noise[i] = randf();
-  }
 
   GLuint vao;
   glGenVertexArrays(1, &vao);
@@ -879,27 +1262,7 @@ int main(void) {
   glErrorCheck("shader");
 
   GLuint time_loc = glGetUniformLocation(program, "time");
-  GLuint utime_loc = glGetUniformLocation(program, "utime");
   GLuint frame_loc = glGetUniformLocation(program, "frame");
-
-  GLuint noise_tex = 0;
-  glGenTextures(1, &noise_tex);
-  glBindTexture(GL_TEXTURE_1D, noise_tex);
-  glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);	
-  glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  glTexStorage1D(GL_TEXTURE_1D, 1, GL_R32F, max_tex);
-  glTexSubImage1D(GL_TEXTURE_1D, 0, 0, max_tex, GL_RED, GL_FLOAT, noise);
-  glBindTexture(GL_TEXTURE_1D, 0);
-  glErrorCheck("noise tex");
-
-  GLuint noise_loc = glGetUniformLocation(program, "noise");
-  glUniform1i(noise_loc, 0);
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_1D, noise_tex);
-
-  GLuint noise_size_loc = glGetUniformLocation(program, "noise_size");
-  glUniform1i(noise_size_loc, max_tex);
 
   const int samples = 1;
   const int depth = 5;
@@ -912,12 +1275,27 @@ int main(void) {
   GLuint res_loc = glGetUniformLocation(program, "res");
   glUniform2f(res_loc, WIDTH, HEIGHT);
 
-  vec3_set(cam.eye, 13.0, 2.0, 3.0);
-  vec3_set(cam.tgt, 0.0, 0.0, 0.0);
+  vec3_set(cam.eye, 0.0, 0.0, 0.0);
+  vec3_set(cam.tgt, 0.0, 0.0, -1.0);
   vec3_set(cam.vup, 0.0, 1.0, 0.0);
-  cam.vfov = 20.0;
+  cam.vfov = 90.0;
   cam.defocus_angle = 0.0;
   cam.focus_dist = 10.0;
+
+  JObj cam_json = json_value_as_object(json_aref(scene, "camera"));
+  if (!cam_json) { fprintf(stderr, "failed to parse scene, missing camera object\n"); return 1; }
+  JAny vfov_val = json_aref(cam_json, "vfov");
+  if (vfov_val) cam.vfov = json_float(vfov_val);
+  JAny eye_val = json_aref(cam_json, "lookfrom");
+  if (eye_val) json_vec3(cam.eye, eye_val);
+  JAny tgt_val = json_aref(cam_json, "lookat");
+  if (tgt_val) json_vec3(cam.tgt, tgt_val);
+  JAny vup_val = json_aref(cam_json, "vup");
+  if (vup_val) json_vec3(cam.vup, vup_val);
+  JAny defocus_angle_val = json_aref(cam_json, "defocus_angle");
+  if (defocus_angle_val) cam.defocus_angle = json_float(defocus_angle_val);
+  JAny focus_dist_val = json_aref(cam_json, "focus_dist");
+  if (focus_dist_val) cam.focus_dist = json_float(focus_dist_val);
 
   GLuint eye_loc = glGetUniformLocation(program, "eye");
   glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
@@ -933,66 +1311,74 @@ int main(void) {
   glUniform1f(focus_dist_loc, cam.focus_dist);
   glErrorCheck("cam");
 
-  int gmat = make_glass(1.5);
+  JObj noises_json = json_value_as_object(json_aref(scene, "noises"));
+  if (!noises_json) { fprintf(stderr, "noises missing or is not an object!\n"); return 1; }
+  JObj images_json = json_value_as_object(json_aref(scene, "images"));
+  if (!images_json) { fprintf(stderr, "images missing or is not an object!\n"); return 1; }
+  JObj textures_json = json_value_as_object(json_aref(scene, "textures"));
+  if (!textures_json) { fprintf(stderr, "textures missing or is not an object!\n"); return 1; }
+  JObj materials_json = json_value_as_object(json_aref(scene, "materials"));
+  if (!materials_json) { fprintf(stderr, "materials missing or is not an object!\n"); return 1; }
 
-  // ground
-  int noise_id = make_perlin_noise(10.0, 3, 2);
-  // int ground_mat = make_lambert(CHECKER, make_checker(2.0, SOLID, make_solid_color((vec3){0.2, 0.3, 0.1}), NOISE, noise_id));
-  int ground_mat = make_lambert(CHECKER, make_solid_checker(2.0, (vec3){0.2, 0.3, 0.1}, (vec3){0.9, 0.9, 0.9}));
-  // int ground_mat = make_lambert(NOISE, noise_id);
-  make_sphere((vec3){0.0, -1000.0, 0.0}, 1000.0, LAMBERT, ground_mat);
+  HNEW(noises_h, noises_json->length);
+  HNEW(images_h, images_json->length);
+  HNEW(textures_h, textures_json->length);
+  HNEW(materials_h, materials_json->length);
 
-  make_sphere((vec3){0.0, 1.0, 0.0}, 1.0, GLASS, gmat);
-  make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(IMAGE, make_image_tex_from_file("moon.png")));
-  // make_sphere((vec3){-4.0, 1.0, 0.0}, 1.0, LAMBERT, make_lambert(NOISE, noise_id));
-  make_sphere((vec3){4.0, 1.0, 0.0}, 1.0, METAL, make_metal(IMAGE, make_image_tex_from_file("earth.png"), 0.0));
+  JSON_OBJ_EACH(noises_json, k, v, {
+    HPUT(noises_h, k, parse_noise(json_value_as_object(v)));
+  });
+  JSON_OBJ_EACH(images_json, k, v, {
+    HPUT(images_h, k, parse_image(json_value_as_object(v)));
+  });
+  JSON_OBJ_EACH(textures_json, k, v, {
+    HPUT(textures_h, k, parse_texture(json_value_as_object(v)));
+  });
+  JSON_OBJ_EACH(materials_json, k, v, {
+    HPUT(materials_h, k, parse_material(json_value_as_object(v)));
+  });
 
-  for (int a = -11; a < 11; a++) {
-    for (int b = -11; b < 11; b++) {
-      float choose_mat = randf();
-      vec3 center;
-      vec3_set(center, a + 0.9*randf(), 0.2, b + 0.9*randf());
-
-      vec3 tmp;
-      vec3_sub(tmp, center, (vec3){4.0, 0.2, 0.0});
-      if (vec3_len(tmp) > 0.9) {
-        if (choose_mat < 0.8) {
-          // diffuse
-          vec3 r, c, center2;
-          vec3_rand(r);
-          vec3_rand(c);
-          vec3_mul(c, c, r);
-          vec3_add(center2, center, (vec3){0.0, randf()*0.5, 0.0});
-          make_moving_sphere(center, center2, 0.2, LAMBERT, make_lambert_solid(c));
-        } else if (choose_mat < 0.95) {
-          // metal
-          vec3 r, c;
-          vec3_rand(r);
-          vec3_rand(c);
-          vec3_mul(c, c, r);
-          make_sphere(center, 0.2, METAL, make_metal_solid(c, randf()*0.5));
-        } else {
-          // glass
-          make_sphere(center, 0.2, GLASS, gmat);
-        }
-      }
+  JObj world_json = json_value_as_object(json_aref(scene, "world"));
+  if (!world_json) { fprintf(stderr, "world missing or is not an object!\n"); return 1; }
+  JSON_OBJ_EACH(world_json, _, val, {
+    JObj obj = json_value_as_object(val);
+    JStr type_str = json_value_as_string(json_aref(obj, "type"));
+    if (0 == strcmp(type_str->string, "Sphere")) {
+      parse_sphere(obj);
+    } else if (0 == strcmp(type_str->string, "MovingSphere")) {
+      parse_moving_sphere(obj);
+    } else if (0 == strcmp(type_str->string, "Quad")) {
+      parse_quad(obj);
+    } else if (0 == strcmp(type_str->string, "Tri")) {
+      parse_tri(obj);
+    } else if (0 == strcmp(type_str->string, "Box")) {
+      parse_box(obj);
+    } else {
+      fprintf(stderr, "unknown object type %s\n", type_str->string);
     }
+  });
+
+  JObj bg_json = json_value_as_object(json_aref(scene, "background"));
+  if (!bg_json) { fprintf(stderr, "background missing or is not an object!\n"); return 1; }
+  JStr bg_type_str = json_value_as_string(json_aref(bg_json, "type"));
+  if (0 == strcmp(bg_type_str->string, "Solid")) {
+    parse_solid_bg(bg_json);
+  } else if (0 == strcmp(bg_type_str->string, "Gradient")) {
+    parse_grad_bg(bg_json);
+  } else if (0 == strcmp(bg_type_str->string, "SphereMap")) {
+    parse_sphere_map(bg_json);
+  } else if (0 == strcmp(bg_type_str->string, "CubeMap")) {
+    parse_cube_map(bg_json);
+  } else {
+    fprintf(stderr, "unknown object type %s\n", bg_type_str->string);
   }
 
-  // make_tri((vec3){-3.0, -2.0, 5.0}, (vec3){-3.0, -2.0, 1.0}, (vec3){-3.0, 2.0,  5.0}, LAMBERT, make_lambert_solid((vec3){1.0, 0.2, 0.2}));
-  // make_quad((vec3){-2.0, -2.0, 0.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 4.0,  0.0}, LAMBERT, make_lambert_solid((vec3){0.2, 1.0, 0.2}));
-  // make_quad((vec3){ 3.0, -2.0, 1.0}, (vec3){0.0, 0.0,  4.0}, (vec3){0.0, 4.0,  0.0}, LAMBERT, make_lambert_solid((vec3){0.2, 0.2, 1.0}));
-  // make_quad((vec3){-2.0,  3.0, 1.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 0.0,  4.0}, LAMBERT, make_lambert_solid((vec3){1.0, 0.5, 0.0}));
-  // make_quad((vec3){-2.0, -3.0, 5.0}, (vec3){4.0, 0.0,  0.0}, (vec3){0.0, 0.0, -4.0}, LAMBERT, make_lambert_solid((vec3){0.2, 0.8, 0.8}));
+  hashmap_destroy(&noises_h);
+  hashmap_destroy(&images_h);
+  hashmap_destroy(&textures_h);
+  hashmap_destroy(&materials_h);
 
-  // make_box(
-  //   (vec3){-0.5, -0.5, 1.5},
-  //   (vec3){0.5, 0.5, 2.5},
-  //   LIGHT,
-  //   make_light_solid((vec3){10.0, 10.0, 10.0})
-  // );
-
-  make_sphere_map_from_file("chinese_garden_4k.hdr");
+  free(scene_json);
 
   make_bvh_nodes(0, obj_count);
 
@@ -1090,15 +1476,15 @@ int main(void) {
   glErrorCheck("tex storage 3d");
   for (int i = 0; i < image_count; i++) {
     glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, images[i].width, images[i].height, 1, GL_RGB, GL_FLOAT, images[i].data);
-    printf("i %i\n", i);
+    free(images[i].data);
     glErrorCheck("tex sub data 3d");
   }
   glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
   glErrorCheck("setup images");
 
   GLuint images_loc = glGetUniformLocation(program, "images");
-  glUniform1i(images_loc, 1);
-  glActiveTexture(GL_TEXTURE1);
+  glUniform1i(images_loc, 0);
+  glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D_ARRAY, images_tex);
 
   glfwGetCursorPos(window, &last_mouse[0], &last_mouse[1]);
@@ -1116,7 +1502,6 @@ int main(void) {
 
     float t = glfwGetTime();
     glUniform1f(time_loc, t);
-    glUniform1ui(utime_loc, (GLuint)t);
 
     nframes++;
     if (t - last_time > 1.0) {
@@ -1126,12 +1511,6 @@ int main(void) {
     }
 
     glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
-
-    for (GLsizei i = 0; i < max_tex; i++) {
-      noise[i] = randf();
-    }
-    glBindTexture(GL_TEXTURE_1D, noise_tex);
-    glTexSubImage1D(GL_TEXTURE_1D, 0, 0, max_tex, GL_RED, GL_FLOAT, noise);
 
     if (clear) {
       glClearColor(0.7f, 0.9f, 0.1f, 1.0f);
@@ -1157,6 +1536,5 @@ int main(void) {
 
   glfwTerminate();
 
-  free(noise);
   return 0;
 }

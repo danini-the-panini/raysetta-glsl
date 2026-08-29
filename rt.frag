@@ -60,9 +60,6 @@ uniform float focus_dist;
 uniform int samples;
 uniform int depth;
 
-uniform int noise_size;
-uniform sampler1D noise;
-
 uniform sampler2DArray images;
 
 uniform float time;
@@ -249,12 +246,8 @@ uniform int bvh_count;
 in vec2 uv;
 layout (location = 0) out vec4 outColor;
 
-int rand_index;
-float rand() {
-  vec4 r = texelFetch(noise, rand_index, 0);
-  rand_index = (rand_index+1)%noise_size;
-  return r.x;
-}
+float seed;
+float rand() { return fract(sin(seed++)*43758.5453123); }
 
 float rand(float min, float max) {
   return min + (max-min)*rand();
@@ -410,7 +403,6 @@ float turb(Perlin self, vec3 pt, int d) {
 
 vec3 noise_sample(Noise tex, vec2 uv, vec3 pt) {
   Perlin noise = perlins[tex.id];
-  // return vec3(1.0) * 0.5 * (1.0 + perlin_noise(noise, pt * tex.scale));
   if (tex.axis < 0) {
     return vec3(1.0) * turb(noise, pt, tex.depth);
   } else {
@@ -731,7 +723,7 @@ vec3 bg_color(Ray ray) {
   } else if (bg_type == GRAD) {
     vec3 unit_dir = normalize(ray.dir);
     float a = 0.5*(unit_dir.y + 1.0);
-    return mix(grad_bg.top, grad_bg.bottom, a);
+    return mix(grad_bg.bottom, grad_bg.top, a);
   } else if (bg_type == SPHMAP) {
     vec3 unit_dir = normalize(ray.dir);
     vec2 uv = sphere_uv(unit_dir);
@@ -743,39 +735,40 @@ vec3 bg_color(Ray ray) {
   }
 }
 
-bool ray_color1(Ray ray, out Ray ray2, out vec3 col) {
+bool ray_color1(Ray ray, out Ray ray2, out vec3 att, out vec3 em) {
   Hit hit;
   if (!hit_world(ray, Range(0.001, pos_inf), hit)) {
-    col = bg_color(ray);
+    em = bg_color(ray);
     return false;
   }
-  vec3 em = emit(hit);
-  vec3 att;
+  em = emit(hit);
   if (!scat(ray, hit, att, ray2)) {
-    col = em;
     return false;
   }
-  col = att + em;
   return true;
 }
 
 vec3 ray_color(Ray ray) {
   Ray ray2 = ray;
-  vec3 att = vec3(1.0, 1.0, 1.0);
+  vec3 total_att = vec3(1.0);
+  vec3 acc = vec3(0.0);
+
+  vec3 att, em;
   for (int i = 0; i < depth; i++) {
-    vec3 col;
-    if (ray_color1(ray, ray2, col)) {
-      att *= col;
+    if (ray_color1(ray, ray2, att, em)) {
+      acc += em*total_att;
+      total_att *= att;
       ray = ray2;
     } else {
-      return col*att;
+      acc += em*total_att;
+      break;
     }
   }
-  return vec3(0.0, 0.0, 0.0);
+  return acc*total_att;
 }
 
 void main() {
-  rand_index = int(time + floor(gl_FragCoord.x) + floor(res.x * gl_FragCoord.y)) % noise_size;
+  seed = time + res.y * gl_FragCoord.x / res.x + gl_FragCoord.y / res.y;
 
   scr = uv * res;
 
