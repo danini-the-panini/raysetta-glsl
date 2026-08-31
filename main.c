@@ -31,7 +31,6 @@ typedef struct json_number_s *JNum;
 
 #define WIDTH 400
 #define HEIGHT 200
-#define TARGET_FPS 60
 
 #define LAMBERT 0
 #define METAL 1
@@ -990,7 +989,63 @@ void on_scroll(GLFWwindow *win, double dx, double dy) {
   clear = true;
 }
 
+static GLuint program;
+
+static GLuint samples_loc, depth_loc;
 static int samples = 2;
+static int depth = 10;
+static const char *base_title = "Raysetta";
+static int fps = 0;
+
+static void update_title(GLFWwindow *win) {
+  char *fps_str = malloc(10);
+  if (fps > 0)
+    sprintf(fps_str, "%i FPS", fps);
+  else
+    fps_str[0] = '\0';
+  char *title = malloc(200);
+  sprintf(title, "%s (%i samples, %i depth) %s", base_title, samples, depth, fps_str);
+  glfwSetWindowTitle(win, title);
+}
+
+void set_samples(GLFWwindow *win, int s) {
+  samples = s;
+  if (samples < 1) samples = 1;
+  update_title(win);
+  glUseProgram(program);
+  glUniform1i(samples_loc, samples);
+}
+
+void set_depth(GLFWwindow *win, int s) {
+  depth = s;
+  if (depth < 1) depth = 1;
+  update_title(win);
+  glUseProgram(program);
+  glUniform1i(depth_loc, depth);
+  clear = true;
+}
+
+void on_key(GLFWwindow *win, int key, int scancode, int action, int mods) {
+  if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+    switch (key) {
+    case GLFW_KEY_UP:
+      set_samples(win, samples+1);
+      break;
+    case GLFW_KEY_DOWN:
+      set_samples(win, samples-1);
+      break;
+    case GLFW_KEY_LEFT:
+      set_depth(win, depth-1);
+      break;
+    case GLFW_KEY_RIGHT:
+      set_depth(win, depth+1);
+      break;
+    }
+  }
+  if (action == GLFW_PRESS && key == GLFW_KEY_R) {
+    clear = true;
+  }
+}
 
 int main(int argc, char **argv) {
   if (argc != 2) {
@@ -1155,12 +1210,13 @@ int main(int argc, char **argv) {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-  GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT, "raysetta-gl", NULL, NULL);
+  GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT, base_title, NULL, NULL);
   if (!window) {
     fprintf(stderr, "failed to create window\n");
     glfwTerminate();
     return 1;
   }
+  update_title(window);
   glfwMakeContextCurrent(window);
 
   int version = gladLoadGL(glfwGetProcAddress);
@@ -1210,7 +1266,7 @@ int main(int argc, char **argv) {
   frag = load_shader(frag_src, GL_FRAGMENT_SHADER);
   free(frag_src);
 
-  const GLuint program = glCreateProgram();
+  program = glCreateProgram();
   glAttachShader(program, vert);
   glAttachShader(program, frag);
   glLinkProgram(program);
@@ -1244,11 +1300,9 @@ int main(int argc, char **argv) {
   GLuint time_loc = glGetUniformLocation(program, "time");
   GLuint frame_loc = glGetUniformLocation(program, "frame");
 
-  const int depth = 10;
-
-  GLuint samples_loc = glGetUniformLocation(program, "samples");
+  samples_loc = glGetUniformLocation(program, "samples");
   glUniform1i(samples_loc, samples);
-  GLuint depth_loc = glGetUniformLocation(program, "depth");
+  depth_loc = glGetUniformLocation(program, "depth");
   glUniform1i(depth_loc, depth);
 
   res_loc = glGetUniformLocation(program, "res");
@@ -1430,12 +1484,12 @@ int main(int argc, char **argv) {
   glfwSetFramebufferSizeCallback(window, on_resize);
   glfwSetCursorPosCallback(window, on_mouse_move);
   glfwSetScrollCallback(window, on_scroll);
+  glfwSetKeyCallback(window, on_key);
 
   glErrorCheck("before draw");
 
   int nframes = 0;
-  double last_time = glfwGetTime(); 
-  double last_fps = last_time;
+  double last_time = glfwGetTime();
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
 
@@ -1444,23 +1498,13 @@ int main(int argc, char **argv) {
 
     double t = glfwGetTime();
     glUniform1f(time_loc, (float)t);
-    double delta = t - last_time;
-    last_time = t;
 
     nframes++;
-    if (t - last_fps > 1.0) {
-      printf("FPS %i (%i samples)\n", nframes, samples);
-      double delta_factor = (float)nframes / (float)TARGET_FPS;
-      int target_samples = (int)(round(samples * delta_factor));
-      if (target_samples < 1) target_samples = 1;
-      if (samples != target_samples) {
-        samples = target_samples;
-        printf("adjusting samples to %i\n-----\n", samples);
-        glUniform1i(samples_loc, samples);
-      }
-
+    if (t - last_time > 1.0) {
+      fps = nframes;
+      update_title(window);
       nframes = 0;
-      last_fps += 1.0;
+      last_time += 1.0;
     }
 
     glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
