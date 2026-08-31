@@ -31,6 +31,7 @@ typedef struct json_number_s *JNum;
 
 #define WIDTH 400
 #define HEIGHT 200
+#define FACTOR 2
 
 #define LAMBERT 0
 #define METAL 1
@@ -205,6 +206,10 @@ static inline void vec3_set(vec3 v, float x, float y, float z) {
   v[2] = z;
 }
 
+static inline bool vec3_z(vec3 v) {
+  return fabsf(v[0]) < 1e-6 && fabsf(v[1]) < 1e-6 && fabsf(v[2]) < 1e-6;
+}
+
 static FILE *open_file(const char *filename, size_t *len) {
   FILE *file = fopen(filename, "r");
   if (!file) {
@@ -353,6 +358,9 @@ static ImageTex *image_tex = NULL;
 static Perlin *perlins = NULL;
 static Noise *noises = NULL;
 static ImageData *images = NULL;
+
+static GLuint *meshes, *vert_bufs, *idx_bufs, *idx_counts;
+static GLuint pos_loc, nor_loc, vp_loc, mdl_loc;
 
 static SolidColor solid_bg;
 static Gradient grad_bg;
@@ -544,7 +552,152 @@ static inline int make_sphere(vec3 center, float radius, int mat_type, int mat_i
   return make_moving_sphere(center, center, radius, mat_type, mat_id);
 }
 
-static inline int make_plane(vec3 q, vec3 u, vec3 v, int plane_type, int mat_type, int mat_id) {
+static inline void fill_bufs(size_t nv, size_t ni, float *verts, GLuint *ind, GLuint vb, GLuint ib) {
+  glBindBuffer(GL_ARRAY_BUFFER, vb);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(float)*nv*2, verts, GL_STATIC_DRAW);
+  glEnableVertexAttribArray(pos_loc);
+  glVertexAttribPointer(pos_loc, 3, GL_FLOAT, GL_FALSE, sizeof(float)*6, NULL);
+  glEnableVertexAttribArray(nor_loc);
+  glVertexAttribPointer(nor_loc, 3, GL_FLOAT, GL_FALSE, sizeof(float)*6, (void*)(sizeof(float)*3));
+
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(GLuint)*ni, ind, GL_STATIC_DRAW);
+  glErrorCheck("fill bufs");
+}
+
+#define PUSHVEC(ary, idx, x, y, z) vec3_set(ary+idx, x, y, z); idx+=3
+#define PUSHSPH(sph, ary, idx, x, y, z) \
+  vec3_set(ary+idx, x, y, z); \
+  vec3_scale(ary+idx, ary+idx, sph->radius); \
+  vec3_add(ary+idx, ary+idx, sph->center); idx+=3; \
+  PUSHVEC(ary, idx, x, y, z)
+#define PUSHIDX(ary, idx, i) ary[idx++] = i;
+static void make_sphere_geom(Sphere *sph, GLuint vert_buf, GLuint idx_buf, GLuint *idx_count) {
+  static const int subs = 128;
+  const size_t nvert = ((subs-1)*(subs*2)+2)*3;
+  const size_t nidx = (subs*2*3)+((subs-2)*(subs*2)*6)+(subs*2*3);
+
+  float *vertices = malloc(sizeof(float)*nvert*2);
+  GLuint *indices = malloc(sizeof(GLuint)*nidx);
+
+  size_t vi = 0;
+  size_t ii = 0;
+
+  PUSHSPH(sph, vertices, vi, 0.0, 0.0, 1.0);
+
+  for (int j = 0; j < subs*2; j++) {
+    int j1 = (j + 1) % (subs * 2);
+    PUSHIDX(indices, ii, 1);
+    PUSHIDX(indices, ii, 1 + j);
+    PUSHIDX(indices, ii, 1 + j1);
+  }
+
+  for (int i = 0; i < subs - 1; i++) {
+    float theta = M_PI * (float)(i + 1) / (float)subs;
+    float sin_theta = sinf(theta);
+    float cos_theta = cosf(theta);
+    int i0 = 1 + i * subs * 2;
+    int i1 = 1 + (i + 1) * subs * 2;
+
+    for (int j = 0; j < subs * 2; j++) {
+      float phi = M_PI * (float)j / (float)subs;
+      float x = sin_theta * cosf(phi);
+      float y = sin_theta * sinf(phi);
+      float z = cos_theta;
+      PUSHSPH(sph, vertices, vi, x, y, z);
+
+      if (i != subs - 2) {
+        int j1 = (j + 1) % (subs * 2);
+        PUSHIDX(indices, ii, i0 + j);
+        PUSHIDX(indices, ii, i1 + j1);
+        PUSHIDX(indices, ii, i0 + j1);
+        PUSHIDX(indices, ii, i1 + j1);
+        PUSHIDX(indices, ii, i0 + j);
+        PUSHIDX(indices, ii, i1 + j);
+      }
+    }
+  }
+  PUSHSPH(sph, vertices, vi, 0.0, 0.0, -1.0);
+
+  int i = 1 + (subs - 2) * subs * 2;
+  for (int j = 0; j < subs * 2; j++) {
+    int j1 = (j + 1) % (subs * 2);
+    PUSHIDX(indices, ii, i + j);
+    PUSHIDX(indices, ii, (subs - 1) * subs * 2 + 1);
+    PUSHIDX(indices, ii, i + j1);
+  }
+
+  fill_bufs(nvert, nidx, vertices, indices, vert_buf, idx_buf);
+  free(vertices);
+  free(indices);
+  *idx_count = nidx;
+}
+
+static void make_quad_geom(Plane *pln, GLuint vert_buf, GLuint idx_buf, GLuint *idx_count) {
+  size_t nvert = 4*3;
+  size_t nidx = 6;
+
+  float *vertices = malloc(sizeof(float)*nvert*2);
+  GLuint *indices = malloc(sizeof(GLuint)*nidx);
+
+  indices[0] = 0;
+  indices[1] = 1;
+  indices[2] = 2;
+  indices[3] = 2;
+  indices[4] = 3;
+  indices[5] = 0;
+
+  for (size_t i = 0; i < nvert; i++) {
+    vec3_copy(vertices+i*6, pln->q);
+    vec3_copy(vertices+i*6+3, pln->n);
+  }
+
+  vec3_add(vertices+1*6, vertices+1*6, pln->u);
+
+  vec3_add(vertices+2*6, vertices+2*6, pln->u);
+  vec3_add(vertices+2*6, vertices+2*6, pln->v);
+
+  vec3_add(vertices+3*6, vertices+3*6, pln->v);
+
+  fill_bufs(nvert, nidx, vertices, indices, vert_buf, idx_buf);
+  free(vertices);
+  free(indices);
+  *idx_count = nidx;
+}
+
+static void make_tri_geom(Plane *pln, GLuint vert_buf, GLuint idx_buf, GLuint *idx_count) {
+  size_t nvert = 3*3;
+  size_t nidx = 3;
+
+  float *vertices = malloc(sizeof(float)*nvert*2);
+  GLuint *indices = malloc(sizeof(GLuint)*nidx);
+
+  indices[0] = 0;
+  indices[1] = 1;
+  indices[2] = 2;
+
+  for (size_t i = 0; i < nvert; i++) {
+    vec3_copy(vertices+i*6, pln->q);
+    vec3_copy(vertices+i*6+3, pln->n);
+  }
+  vec3_add(vertices+1*6, vertices+1*6, pln->u);
+  vec3_add(vertices+2*6, vertices+2*6, pln->v);
+
+  fill_bufs(nvert, nidx, vertices, indices, vert_buf, idx_buf);
+  free(vertices);
+  free(indices);
+  *idx_count = nidx;
+}
+
+static void make_plane_geom(Plane *pln, GLuint vert_buf, GLuint idx_buf, GLuint *idx_count) {
+  if (pln->type == QUAD) {
+    make_quad_geom(pln, vert_buf, idx_buf, idx_count);
+  } else {
+    make_tri_geom(pln, vert_buf, idx_buf, idx_count);
+  }
+}
+
+static int make_plane(vec3 q, vec3 u, vec3 v, int plane_type, int mat_type, int mat_id) {
   if (mat_id < 0) {
     fprintf(stderr, "invalid material id (%i)\n'", mat_id);
     return -1;
@@ -924,32 +1077,75 @@ static void parse_cube_map(JObj bg) {
 }
 
 static GLuint render_tex = 0;
+static GLuint raster_tex = 0;
+static GLuint raster_dtex = 0;
 static GLuint fb = 0;
+static GLuint rfb = 0;
 
-void make_framebuffer(int w, int h) {
-  glGenFramebuffers(1, &fb);
-  glBindFramebuffer(GL_FRAMEBUFFER, fb);
+int make_fb_texture(int w, int h, GLuint ifmt, GLuint fmt) {
+  GLuint t;
+  glGenTextures(1, &t);
 
-  glGenTextures(1, &render_tex);
+  glBindTexture(GL_TEXTURE_2D, t);
+  glTexImage2D(GL_TEXTURE_2D, 0, ifmt, w, h, 0, fmt, GL_FLOAT, NULL);
 
-  glBindTexture(GL_TEXTURE_2D, render_tex);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, NULL);
-
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glBindTexture(GL_TEXTURE_2D, 0);
 
-  glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, render_tex, 0);
-  glDrawBuffer(GL_COLOR_ATTACHMENT0);
+  return t;
+}
 
+void enable_depth(bool e) {
+  if (e)
+    glEnable(GL_DEPTH_TEST);
+  else
+    glDisable(GL_DEPTH_TEST);
+  glDepthMask(e);
+}
+
+void check_framebuffer() {
   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
     fprintf(stderr, "framebuffer incomplete!\n");
   }
-  glErrorCheck("make framebuffer");
+}
+
+void make_framebuffer(int w, int h, GLuint *b, GLuint *t) {
+  glGenFramebuffers(1, b);
+  glBindFramebuffer(GL_FRAMEBUFFER, *b);
+
+  *t = make_fb_texture(w, h, GL_RGBA32F, GL_RGBA);
+
+  glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, *t, 0);
+  glDrawBuffer(GL_COLOR_ATTACHMENT0);
+
+  check_framebuffer();
+}
+
+void make_rt_framebuffer(int w, int h) {
+  make_framebuffer(w/FACTOR, h/FACTOR, &fb, &render_tex);
+  glErrorCheck("make rt framebuffer");
+
+  make_framebuffer(w, h, &rfb, &raster_tex);
+  glErrorCheck("make rs framebuffer");
+  raster_dtex = make_fb_texture(w, h, GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT);
+  glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, raster_dtex, 0);
+  check_framebuffer();
+  glErrorCheck("make rs depth buffer");
 
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, render_tex);
   glErrorCheck("bind render tex");
+
+  glActiveTexture(GL_TEXTURE2);
+  glBindTexture(GL_TEXTURE_2D, raster_tex);
+  glErrorCheck("bind raster tex");
+
+  glActiveTexture(GL_TEXTURE3);
+  glBindTexture(GL_TEXTURE_2D, raster_dtex);
+  glErrorCheck("bind raster depth tex");
 }
 
 void remake_framebuffer(int w, int h) {
@@ -957,7 +1153,7 @@ void remake_framebuffer(int w, int h) {
   fb = 0;
   glDeleteTextures(1, &render_tex);
   render_tex = 0;
-  make_framebuffer(w, h);
+  make_rt_framebuffer(w, h);
 }
 
 static GLuint res_loc;
@@ -989,7 +1185,7 @@ void on_scroll(GLFWwindow *win, double dx, double dy) {
   clear = true;
 }
 
-static GLuint program;
+static GLuint rt_program;
 
 static GLuint samples_loc, depth_loc;
 static int samples = 2;
@@ -1012,7 +1208,7 @@ void set_samples(GLFWwindow *win, int s) {
   samples = s;
   if (samples < 1) samples = 1;
   update_title(win);
-  glUseProgram(program);
+  glUseProgram(rt_program);
   glUniform1i(samples_loc, samples);
 }
 
@@ -1020,7 +1216,7 @@ void set_depth(GLFWwindow *win, int s) {
   depth = s;
   if (depth < 1) depth = 1;
   update_title(win);
-  glUseProgram(program);
+  glUseProgram(rt_program);
   glUniform1i(depth_loc, depth);
   clear = true;
 }
@@ -1129,10 +1325,6 @@ int main(int argc, char **argv) {
   JSON_OBJ_EACH(textures_json, k, v, {
     HPUT(textures_h, k, parse_texture(json_value_as_object(v)));
   });
-  fprintf(stderr, "solid: %i (made %i)\n", tex_counts[0], solid_color_count);
-  fprintf(stderr, "checker: %i (made %i)\n", tex_counts[1], checker_count);
-  fprintf(stderr, "image: %i (made %i)\n", tex_counts[2], image_tex_count);
-  fprintf(stderr, "noise: %i (made %i)\n", tex_counts[3], noise_count);
   assert(solid_color_count == tex_counts[0]);
   assert(checker_count == tex_counts[1]);
   assert(image_tex_count == tex_counts[2]);
@@ -1222,18 +1414,20 @@ int main(int argc, char **argv) {
   int version = gladLoadGL(glfwGetProcAddress);
   printf("GL %d.%d\n", GLAD_VERSION_MAJOR(version), GLAD_VERSION_MINOR(version));
 
+  glDisable(GL_CULL_FACE);
+
   GLuint vao;
   glGenVertexArrays(1, &vao);
 
-  GLuint vert, frag;
-  if (!load_shader_from_file("full_screen.vert", GL_VERTEX_SHADER, &vert)) return 1;
+  GLuint fs_vert, rt_frag;
+  if (!load_shader_from_file("full_screen.vert", GL_VERTEX_SHADER, &fs_vert)) return 1;
 
   size_t rt_bytes;
   char *rt_src = load_file_cstr("rt.frag", &rt_bytes);
 
   size_t extra_bytes = 500;
-  char *frag_src = malloc(rt_bytes + extra_bytes);
-  int frag_bytes = sprintf(frag_src,
+  char *rt_frag_src = malloc(rt_bytes + extra_bytes);
+  int rt_frag_bytes = sprintf(rt_frag_src,
     "#version 410 core\n"
     "precision highp float;\n"
     "#define SPHERE_COUNT %i\n"
@@ -1257,79 +1451,133 @@ int main(int argc, char **argv) {
     image_count, perlin_count, bvh_count, bg_type,
     rt_src
   );
-  if (frag_bytes < 0) {
+  if (rt_frag_bytes < 0) {
     fprintf(stderr, "failed to generate shader source\n");
     return 1;
   }
   free(rt_src);
 
-  frag = load_shader(frag_src, GL_FRAGMENT_SHADER);
-  free(frag_src);
+  rt_frag = load_shader(rt_frag_src, GL_FRAGMENT_SHADER);
+  free(rt_frag_src);
 
-  program = glCreateProgram();
-  glAttachShader(program, vert);
-  glAttachShader(program, frag);
-  glLinkProgram(program);
+  rt_program = glCreateProgram();
+  glAttachShader(rt_program, fs_vert);
+  glAttachShader(rt_program, rt_frag);
+  glLinkProgram(rt_program);
 
-  if (!check_program(program)) {
+  if (!check_program(rt_program)) {
     fprintf(stderr, "failed to link rt program\n");
-    print_shader_info_log(vert);
-    print_shader_info_log(frag);
-    print_program_info_log(program);
+    print_shader_info_log(fs_vert);
+    print_shader_info_log(rt_frag);
+    print_program_info_log(rt_program);
     return 1;
   }
+
+  GLuint rs_vert, rs_frag;
+  if (!load_shader_from_file("raster.vert", GL_VERTEX_SHADER, &rs_vert)) return 1;
+  if (!load_shader_from_file("raster.frag", GL_FRAGMENT_SHADER, &rs_frag)) return 1;
+
+  const GLuint rs_program = glCreateProgram();
+  glAttachShader(rs_program, rs_vert);
+  glAttachShader(rs_program, rs_frag);
+  glLinkProgram(rs_program);
+
+  if (!check_program(rs_program)) {
+    fprintf(stderr, "failed to link raster program\n");
+    print_shader_info_log(rs_vert);
+    print_shader_info_log(rs_frag);
+    print_program_info_log(rs_program);
+    return 1;
+  }
+  glUseProgram(rs_program);
+
+  vp_loc = glGetUniformLocation(rs_program, "view_proj");
+  mdl_loc = glGetUniformLocation(rs_program, "model");
+
+  pos_loc = glGetAttribLocation(rs_program, "position");
+  nor_loc = glGetAttribLocation(rs_program, "normal");
 
   GLuint screen_frag;
   if (!load_shader_from_file("screen.frag", GL_FRAGMENT_SHADER, &screen_frag)) return 1;
 
   const GLuint screen_program = glCreateProgram();
-  glAttachShader(screen_program, vert);
+  glAttachShader(screen_program, fs_vert);
   glAttachShader(screen_program, screen_frag);
   glLinkProgram(screen_program);
 
   if (!check_program(screen_program)) {
     fprintf(stderr, "failed to link screen program\n");
-    print_shader_info_log(vert);
+    print_shader_info_log(fs_vert);
     print_shader_info_log(screen_frag);
     print_program_info_log(screen_program);
     return 1;
   }
-  glUseProgram(program);
+
+  glUseProgram(rt_program);
   glErrorCheck("shader");
 
-  GLuint time_loc = glGetUniformLocation(program, "time");
-  GLuint frame_loc = glGetUniformLocation(program, "frame");
+  GLuint time_loc = glGetUniformLocation(rt_program, "time");
+  GLuint frame_loc = glGetUniformLocation(rt_program, "frame");
 
-  samples_loc = glGetUniformLocation(program, "samples");
+  samples_loc = glGetUniformLocation(rt_program, "samples");
   glUniform1i(samples_loc, samples);
-  depth_loc = glGetUniformLocation(program, "depth");
+  depth_loc = glGetUniformLocation(rt_program, "depth");
   glUniform1i(depth_loc, depth);
 
-  res_loc = glGetUniformLocation(program, "res");
+  res_loc = glGetUniformLocation(rt_program, "res");
   glUniform2f(res_loc, WIDTH, HEIGHT);
 
-  glDeleteShader(vert);
-  glDeleteShader(frag);
+  glDeleteShader(fs_vert);
+  glDeleteShader(rt_frag);
   glDeleteShader(screen_frag);
+  glDeleteShader(rs_vert);
+  glDeleteShader(rs_frag);
 
-  GLuint bvh_count_loc = glGetUniformLocation(program, "bvh_count");
+  GLuint bvh_count_loc = glGetUniformLocation(rt_program, "bvh_count");
   glUniform1i(bvh_count_loc, bvh_count);
 
-  GLuint eye_loc = glGetUniformLocation(program, "eye");
+  GLuint eye_loc = glGetUniformLocation(rt_program, "eye");
   glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
-  GLuint tgt_loc = glGetUniformLocation(program, "tgt");
+  GLuint tgt_loc = glGetUniformLocation(rt_program, "tgt");
   glUniform3f(tgt_loc, cam.tgt[0], cam.tgt[1], cam.tgt[2]);
-  GLuint vup_loc = glGetUniformLocation(program, "vup");
+  GLuint vup_loc = glGetUniformLocation(rt_program, "vup");
   glUniform3f(vup_loc, cam.vup[0], cam.vup[1], cam.vup[2]);
-  GLuint vfov_loc = glGetUniformLocation(program, "vfov");
+  GLuint vfov_loc = glGetUniformLocation(rt_program, "vfov");
   glUniform1f(vfov_loc, cam.vfov);
-  GLuint defocus_angle_loc = glGetUniformLocation(program, "defocus_angle");
+  GLuint defocus_angle_loc = glGetUniformLocation(rt_program, "defocus_angle");
   glUniform1f(defocus_angle_loc, cam.defocus_angle);
-  GLuint focus_dist_loc = glGetUniformLocation(program, "focus_dist");
+  GLuint focus_dist_loc = glGetUniformLocation(rt_program, "focus_dist");
   glUniform1f(focus_dist_loc, cam.focus_dist);
   glErrorCheck("cam");
 
-  GLuint obj_buf = make_unibuffer(program, sizeof(Sphere)*sphere_count+sizeof(Plane)*plane_count, "ObjBlock");
+  glUseProgram(rs_program);
+
+  int raster_count = plane_count + obj_counts[0];
+  meshes = malloc(sizeof(GLuint)*raster_count);
+  vert_bufs = malloc(sizeof(GLuint)*raster_count);
+  idx_bufs = malloc(sizeof(GLuint)*raster_count);
+  idx_counts = malloc(sizeof(GLuint)*raster_count);
+  glGenVertexArrays(obj_count, meshes);
+  glGenBuffers(obj_count, vert_bufs);
+  glGenBuffers(obj_count, idx_bufs);
+  int obj_index = 0;
+  for (int i = 0; i < sphere_count; i++) {
+    if (!vec3_z(spheres[i].vec)) continue;
+    glBindVertexArray(meshes[obj_index]);
+    make_sphere_geom(spheres+i, vert_bufs[obj_index], idx_bufs[obj_index], idx_counts+obj_index);
+    glBindVertexArray(0);
+    obj_index++;
+  }
+  for (int i = 0; i < plane_count; i++, obj_index++) {
+    glBindVertexArray(meshes[obj_index]);
+    make_plane_geom(planes+i, vert_bufs[obj_index], idx_bufs[obj_index], idx_counts+obj_index);
+    glBindVertexArray(0);
+  }
+
+  glUseProgram(rt_program);
+
+  GLuint obj_buf = make_unibuffer(rt_program, sizeof(Sphere)*sphere_count+sizeof(Plane)*plane_count, "ObjBlock");
+
   glBindBuffer(GL_UNIFORM_BUFFER, obj_buf);
   if (sphere_count > 0) {
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Sphere)*sphere_count, spheres);
@@ -1342,7 +1590,7 @@ int main(int argc, char **argv) {
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
   glErrorCheck("bind obj");
 
-  GLuint mat_buf = make_unibuffer(program,
+  GLuint mat_buf = make_unibuffer(rt_program,
                     sizeof(Lambert)*lambert_count+
                       sizeof(Metal)*metal_count+
                       sizeof(Glass)*glass_count+
@@ -1376,7 +1624,7 @@ int main(int argc, char **argv) {
   }
   glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
-  GLuint bvh_buf = make_unibuffer(program, sizeof(BVHNode)*bvh_count, "BvhBlock");
+  GLuint bvh_buf = make_unibuffer(rt_program, sizeof(BVHNode)*bvh_count, "BvhBlock");
   glBindBuffer(GL_UNIFORM_BUFFER, bvh_buf);
   if (bvh_count > 0)
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(BVHNode)*bvh_count, bvh_nodes);
@@ -1385,7 +1633,7 @@ int main(int argc, char **argv) {
   free(bvh_nodes);
   free(objects);
 
-  GLuint tex_buf = make_unibuffer(program,
+  GLuint tex_buf = make_unibuffer(rt_program,
                     sizeof(SolidColor)*solid_color_count+
                       sizeof(Checker)*checker_count+
                       sizeof(ImageTex)*image_tex_count+
@@ -1418,7 +1666,7 @@ int main(int argc, char **argv) {
   glErrorCheck("bind tex");
 
   if (perlin_count > 0) {
-    GLuint perl_buf = make_unibuffer(program, sizeof(Perlin)*perlin_count, "PerlinBlock");
+    GLuint perl_buf = make_unibuffer(rt_program, sizeof(Perlin)*perlin_count, "PerlinBlock");
     glBindBuffer(GL_UNIFORM_BUFFER, perl_buf);
     if (perlin_count > 0)
       glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(Perlin)*perlin_count, perlins);
@@ -1427,17 +1675,17 @@ int main(int argc, char **argv) {
     free(perlins);
   }
 
-  #define MAKE_BG_BUF(name, type) \
+  #define MAKE_BG_BUF(program, name, type) \
     bg_buf = make_unibuffer(program, sizeof(type), "BgBlock"); \
     glBindBuffer(GL_UNIFORM_BUFFER, bg_buf); \
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(type), &(name))
 
   GLuint bg_buf;
   switch (bg_type) {
-  case SOLID: MAKE_BG_BUF(solid_bg, SolidColor); break;
-  case GRADIENT: MAKE_BG_BUF(grad_bg, Gradient); break;
-  case SPHERE_MAP: MAKE_BG_BUF(sphere_map, TypeId); break;
-  case CUBE_MAP: MAKE_BG_BUF(cube_map, CubeMap); break;
+  case SOLID: MAKE_BG_BUF(rt_program, solid_bg, SolidColor); break;
+  case GRADIENT: MAKE_BG_BUF(rt_program, grad_bg, Gradient); break;
+  case SPHERE_MAP: MAKE_BG_BUF(rt_program, sphere_map, TypeId); break;
+  case CUBE_MAP: MAKE_BG_BUF(rt_program, cube_map, CubeMap); break;
   default:
     fprintf(stderr, "unknown bg_type %i\n", bg_type);
     return 1;
@@ -1464,20 +1712,24 @@ int main(int argc, char **argv) {
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
     glErrorCheck("setup images");
 
-    GLuint images_loc = glGetUniformLocation(program, "images");
+    GLuint images_loc = glGetUniformLocation(rt_program, "images");
     glUniform1i(images_loc, 1);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D_ARRAY, images_tex);
   }
 
-  make_framebuffer(WIDTH, HEIGHT);
+  make_rt_framebuffer(WIDTH, HEIGHT);
 
-  GLuint prev_frame_loc = glGetUniformLocation(program, "prev_frame");
+  GLuint prev_frame_loc = glGetUniformLocation(rt_program, "prev_frame");
   glUniform1i(prev_frame_loc, 0);
 
   glUseProgram(screen_program);
   GLuint frame_tex_loc = glGetUniformLocation(screen_program, "frame");
   glUniform1i(frame_tex_loc, 0);
+  GLuint raster_loc = glGetUniformLocation(screen_program, "raster");
+  glUniform1i(raster_loc, 2);
+  GLuint raster_dloc = glGetUniformLocation(screen_program, "raster_depth");
+  glUniform1i(raster_dloc, 3);
 
   glfwGetCursorPos(window, &last_mouse[0], &last_mouse[1]);
 
@@ -1493,7 +1745,32 @@ int main(int argc, char **argv) {
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
 
-    glUseProgram(program);
+    int w, h;
+    glfwGetFramebufferSize(window, &w, &h);
+
+    enable_depth(true);
+    glUseProgram(rs_program);
+    glBindFramebuffer(GL_FRAMEBUFFER, rfb);
+    glViewport(0, 0, w, h);
+    glClearColor(0.0, 0.0, 0.0, 1.0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    mat4x4 view, proj, vp;
+    mat4x4_identity(vp);
+    mat4x4_look_at(view, cam.eye, cam.tgt, cam.vup);
+    mat4x4_perspective(proj, (cam.vfov / 180.0) * M_PI, (float)w / (float)h, 0.001, 1000.0);
+    mat4x4_mul(vp, proj, view);
+
+    glUniformMatrix4fv(vp_loc, 1, GL_FALSE, (const GLfloat*)&vp);
+
+    for (int i = 0; i < obj_index; i++) {
+      glBindVertexArray(meshes[i]);
+      glDrawElements(GL_TRIANGLES, idx_counts[i], GL_UNSIGNED_INT, 0);
+    }
+
+    enable_depth(false);
+
+    glUseProgram(rt_program);
     glBindFramebuffer(GL_FRAMEBUFFER, fb);
 
     double t = glfwGetTime();
@@ -1509,11 +1786,10 @@ int main(int argc, char **argv) {
 
     glUniform3f(eye_loc, cam.eye[0], cam.eye[1], cam.eye[2]);
 
+    glViewport(0, 0, w/FACTOR, h/FACTOR);
     if (clear) {
-      int w, h;
-      glfwGetFramebufferSize(window, &w, &h);
-      glViewport(0, 0, w, h);
-      glUniform2f(res_loc, w, h);
+      glUniform2f(res_loc, w/FACTOR, h/FACTOR);
+      glClear(GL_COLOR_BUFFER_BIT);
       clear = false;
       frame = 0;
     } else {
@@ -1528,10 +1804,16 @@ int main(int argc, char **argv) {
 
     glUseProgram(screen_program);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, w, h);
+    glBindVertexArray(vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     glfwSwapBuffers(window);
   }
+
+  free(meshes);
+  free(vert_bufs);
+  free(idx_counts);
 
   glfwTerminate();
 
