@@ -17,5 +17,10 @@ Implementation of [Raysetta](https://github.com/danini-the-panini/raysetta) on t
 Click and drag to move camera, scroll to zoom.
 
 ⬆️/⬇️ controls number of samples.
+
 ⬅️/➡️ controls max depth.
+
 `R` to redraw.
+
+![example scene](/example.png)
+![cornell box](/cornell.png)
